@@ -3,6 +3,7 @@ import { getAllBadgeAppids, getGame, isDBEmpty, countGames, getAllGames, getCard
 import { STEAM_PROFILE_PATH, setSteamCookie, getSteamCookie, getSteamProfilePath } from './utils.js';
 import { getSteamCookies } from './auth.js';
 import { fetchMarketPricesV2, fetchSingleCardPrice } from './market.js';
+import { startMarketWorker, enqueueGameCards, enqueueMarketRefresh, enqueueStaleCards, getQueueStats, getCardPriceCached, PRIORITY } from './marketQueue.js';
 
 const args = process.argv.slice(2);
 
@@ -336,6 +337,103 @@ async function main() {
             break;
         }
 
+        case '--market':
+        case 'market': {
+            // Worker de marché temps réel standalone
+            //   npm run market              — démarre le worker
+            //   npm run -- --market stats   — stats de la queue
+            //   npm run -- --market price <hash>  — prix en cache d'une carte
+            //   npm run -- --market refresh <hash>  — force le refresh d'une carte
+            const sub = args[1] || 'start';
+            switch (sub) {
+                case 'start': {
+                    console.log('[Market] Démarrage du worker de marché temps réel...');
+                    const worker = startMarketWorker();
+                    
+                    // Enfiler toutes les cartes connues au démarrage (priorité basse)
+                    const games = getAllBadgeAppids();
+                    const activeGames = games.filter(g => !g.disabled);
+                    console.log(`[Market] Enfilage de ${activeGames.length} jeux...`);
+                    for (const g of activeGames) {
+                        enqueueGameCards(g.appid, PRIORITY.BACKGROUND);
+                    }
+                    
+                    // Stats toutes les 30s
+                    setInterval(() => {
+                        const stats = getQueueStats();
+                        const wStats = worker.stats();
+                        console.log(`[Market] Queue: ${stats.pending} pending, ${stats.done} done, ${stats.error} errors | Worker: ${wStats.processed} total, ${wStats.rateLimited} rate-limited`);
+                    }, 30000);
+                    
+                    // Garder le process en vie
+                    console.log('[Market] Worker en cours. Ctrl+C pour arrêter.');
+                    break;
+                }
+                case 'stats': {
+                    const stats = getQueueStats();
+                    console.log('\n=== Stats de la queue de marché ===\n');
+                    console.log(`  En attente  : ${stats.pending}`);
+                    console.log(`  En cours    : ${stats.processing}`);
+                    console.log(`  Traités     : ${stats.done}`);
+                    console.log(`  Erreurs     : ${stats.error}`);
+                    console.log(`  Total       : ${stats.total}`);
+                    break;
+                }
+                case 'price': {
+                    const hash = args[2];
+                    if (!hash) {
+                        console.error('Usage: npm run -- --market price <market_hash_name>');
+                        console.error('Ex: npm run -- --market price 616580-Servie');
+                        process.exit(1);
+                    }
+                    // Chercher l'appid depuis le hash
+                    const db = getDB();
+                    const card = db.prepare('SELECT appid, hash FROM cards WHERE hash = ?').get(hash);
+                    if (!card) {
+                        console.error(`Carte non trouvée: ${hash}`);
+                        process.exit(1);
+                    }
+                    const result = getCardPriceCached(card.appid, hash);
+                    console.log('\n' + '═'.repeat(60));
+                    console.log(`  Carte: ${hash}`);
+                    console.log('═'.repeat(60));
+                    console.log(`  Prix     : ${result.priceEur !== null ? result.priceEur + '€' : 'N/A'}`);
+                    console.log(`  Ventes 7j: ${result.sales7d}`);
+                    console.log(`  Mis à jour: ${result.fetchedAt ? new Date(result.fetchedAt).toLocaleString('fr-FR') + ` (${result.ageSeconds}s)` : 'jamais'}`);
+                    console.log(`  Stale    : ${result.stale ? 'oui (refresh en cours)' : 'non'}`);
+                    console.log('═'.repeat(60));
+                    break;
+                }
+                case 'refresh': {
+                    const hash = args[2];
+                    if (!hash) {
+                        console.error('Usage: npm run -- --market refresh <market_hash_name>');
+                        process.exit(1);
+                    }
+                    const db = getDB();
+                    const card = db.prepare('SELECT appid, hash FROM cards WHERE hash = ?').get(hash);
+                    if (!card) {
+                        console.error(`Carte non trouvée: ${hash}`);
+                        process.exit(1);
+                    }
+                    enqueueMarketRefresh(card.appid, hash, PRIORITY.VISIBLE);
+                    console.log(`[Market] ${hash} enfilée en priorité max. Le worker la traitera sous peu.`);
+                    break;
+                }
+                case 'enqueue': {
+                    // Enfiler toutes les cartes stale
+                    const count = enqueueStaleCards();
+                    console.log(`[Market] ${count} cartes stale enfilées.`);
+                    break;
+                }
+                default:
+                    console.error(`Sous-commande inconnue: ${sub}`);
+                    console.error('Sous-commandes: start, stats, price <hash>, refresh <hash>, enqueue');
+                    process.exit(1);
+            }
+            break;
+        }
+
         case '--help':
         case 'help':
         default:
@@ -350,6 +448,11 @@ Steam-SCE Scraper - Commandes disponibles:
   npm run sync:gamecards <appid>  Scanne un appid specifique
   npm run sync:history    Synchronise une fois l historique des trades
   npm run init-db         Initialise la base SQLite
+  npm run market           Démarre le worker de marché temps réel (token bucket adaptatif)
+  npm run -- --market stats   Stats de la queue de marché
+  npm run -- --market price <hash>   Prix en cache d'une carte (stale-while-revalidate)
+  npm run -- --market refresh <hash>  Force le refresh d'une carte
+  npm run -- --market enqueue  Enfiler les cartes stale pour refresh
   npm run -- --sync-once  Synchronise une seule fois l historique (sans boucle)
   npm run -- --purge      Purge le cache complet
   npm run -- --scan-all   Re-scanne tous les badges connus
@@ -360,9 +463,17 @@ Steam-SCE Scraper - Commandes disponibles:
             break;
     }
 
-    // Ne pas appeler process.exit(0) pour le mode daemon (la boucle tourne)
+    // Ne pas appeler process.exit(0) pour le mode daemon et le worker de marché (start)
     if (command !== 'sync' && command !== '--daemon' && command !== 'daemon') {
-        process.exit(0);
+        // --market start garde le process en vie, mais --market stats/price/refresh/enqueue doivent quitter
+        if (command === '--market' || command === 'market') {
+            if (args[1] !== 'start' && args[1] !== undefined) {
+                process.exit(0);
+            }
+            // --market (sans sous-commande) équivaut à --market start → ne pas quitter
+        } else {
+            process.exit(0);
+        }
     }
 }
 

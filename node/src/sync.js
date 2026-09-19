@@ -1,10 +1,11 @@
 import { sleep, isSteamEvent, ES_log, getSteamProfilePath, setSteamCookie, getSteamCookie, httpGet } from './utils.js';
-import { getPageAppids, fetchSteamData, syncSteamInventoryHistory, fetchMarketPricesV2 } from './steam.js';
+import { getPageAppids, fetchSteamData, syncSteamInventoryHistory } from './steam.js';
 import { fetchSCEFresh, resetCreditFlag } from './sce.js';
 import { analyzeBadgeStatus } from './analyze.js';
 import { getAllBadgeAppids, getIncompleteBadgeAppids, getGame, purgeCache, getMeta, setMeta, isDBEmpty, countGames } from './db.js';
 import { getSteamCookies } from './auth.js';
 import { fetchMarketPricesV2, fetchSingleCardPrice } from './market.js';
+import { startMarketWorker, enqueueGameCards, enqueueStaleCards, getQueueStats, PRIORITY } from './marketQueue.js';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
@@ -30,7 +31,8 @@ export async function processQueue(appids, profileLink = null) {
             await fetchSCEFresh(appid);
 
             // 3. Prix marche Steam Community (priceoverview -> EUR + ventes 7j)
-            await fetchMarketPricesV2(appid);
+            //    Délai réduit à 500ms (au lieu de 3s) — le token bucket du worker gère le rate-limit global
+            await fetchMarketPricesV2(appid, 500);
 
             // 4. Analyse
             analyzeBadgeStatus(appid);
@@ -102,6 +104,13 @@ export async function mainWorkflow(profileLink = null) {
         console.error(`[Workflow] Erreur lors du test des cookies: ${e.message}`);
     }
 
+    // --- Démarrage du worker de marché temps réel ---
+    // Token bucket adaptatif : ~100 req/min au lieu du délai fixe de 3s
+    // Les cartes prioritaires sont traitées en 1-2s, le reste en fond
+    console.log('[Workflow] Démarrage du worker de marché temps réel...');
+    const marketWorker = startMarketWorker();
+    console.log('[Workflow] Worker de marché démarré.\n');
+
     // --- CAS 1: BD VIDE -> SCAN COMPLET ---
     if (isDBEmpty()) {
         console.log('Base de donnees vide. Lancement du scan complet...');
@@ -149,11 +158,21 @@ export async function mainWorkflow(profileLink = null) {
         try {
             const updatedAppIds = await syncSteamInventoryHistory(pl);
             
-            // Si des trades nouveaux ont ete detectes, re-fetcher les cartes des jeux concernes
+            // Si des trades nouveaux ont ete detectes, re-scan des jeux concernes
+            // (inventaire + SCE + prix marché + analyse) avec délai réduit à 500ms
             if (updatedAppIds && updatedAppIds.length > 0) {
-                console.log(`[Workflow] ${updatedAppIds.length} jeu(x) avec nouveau trade. Re-scan des cartes...`);
+                console.log(`[Workflow] ${updatedAppIds.length} jeu(x) avec nouveau trade. Re-scan...`);
                 await processQueue(updatedAppIds, pl);
                 console.log(`[Workflow] Re-scan termine pour ${updatedAppIds.length} jeu(x).`);
+            }
+            
+            // Enfiler les cartes stale pour le worker de fond (stale-while-revalidate)
+            enqueueStaleCards();
+            
+            // Stats du worker
+            const stats = getQueueStats();
+            if (stats.total > 0) {
+                console.log(`[Worker] Queue: ${stats.pending} en attente, ${stats.done} traitées, ${stats.error} erreurs`);
             }
             
             console.log(`Cycle ${cycle} termine.`);

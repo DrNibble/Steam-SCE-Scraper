@@ -18,7 +18,10 @@
     "scan-all": "node src/index.js --scan-all",
     "status": "node src/index.js --status",
     "purge": "node src/index.js --purge",
-    "sync-once": "node src/index.js --sync-once"
+    "sync-once": "node src/index.js --sync-once",
+    "market": "node src/index.js --market start",
+    "market:stats": "node src/index.js --market stats",
+    "market:enqueue": "node src/index.js --market enqueue"
   },
   "dependencies": {
     "cheerio": "^1.0.0",

@@ -20,7 +20,7 @@
  *
  * Anti rate-limit :
  *   - 1 requête par endpoint par carte, séquentiel
- *   - Délai 3s entre les cartes
+ *   - Le délai fixe est remplacé par le token bucket de marketQueue.js
  *   - Backoff exponentiel sur 429 (déjà géré par httpGet)
  *   - Pas de parallélisme
  */
@@ -112,6 +112,10 @@ export async function getOrderbook(marketHashName) {
             currency: 'USD', // orderbook est toujours en USD
         };
     } catch (err) {
+        // Propager les 429 pour que le token bucket du worker puisse réagir
+        if (err.message && err.message.includes('429')) {
+            throw err;
+        }
         ES_log(`[getOrderbook] Erreur pour ${marketHashName}: ${err.message}`);
         return null;
     }
@@ -225,6 +229,10 @@ export async function getRecentSale(marketHashName, days = 7) {
             totalVolume,                  // Volume total dans les 7 jours
         };
     } catch (err) {
+        // Propager les 429 pour que le token bucket du worker puisse réagir
+        if (err.message && err.message.includes('429')) {
+            throw err;
+        }
         ES_log(`[getRecentSale] Erreur pour ${marketHashName}: ${err.message}`);
         return null;
     }
@@ -309,9 +317,9 @@ export async function resolveCardPrice(card, days = 7) {
  * Remplace fetchSteamMarketPrices de steam.js par une version plus précise.
  *
  * @param {string} appid - L'appid du jeu
- * @param {number} delayMs - Délai entre les cartes en ms (défaut: 3000)
+ * @param {number} delayMs - Délai entre les cartes en ms (défaut: 500, remplacé par token bucket si marketQueue est utilisé)
  */
-export async function fetchMarketPricesV2(appid, delayMs = 3000) {
+export async function fetchMarketPricesV2(appid, delayMs = 500) {
     const cards = getCards(appid);
     if (!cards || cards.length === 0) {
         ES_log(`[fetchMarketPricesV2] Aucune carte trouvée pour appid ${appid}`);
