@@ -1,9 +1,10 @@
 import { sleep, isSteamEvent, ES_log, getSteamProfilePath, setSteamCookie, getSteamCookie, httpGet } from './utils.js';
-import { getPageAppids, fetchSteamData, syncSteamInventoryHistory, fetchSteamMarketPrices } from './steam.js';
+import { getPageAppids, fetchSteamData, syncSteamInventoryHistory, fetchMarketPricesV2 } from './steam.js';
 import { fetchSCEFresh, resetCreditFlag } from './sce.js';
 import { analyzeBadgeStatus } from './analyze.js';
 import { getAllBadgeAppids, getIncompleteBadgeAppids, getGame, purgeCache, getMeta, setMeta, isDBEmpty, countGames } from './db.js';
 import { getSteamCookies } from './auth.js';
+import { fetchMarketPricesV2, fetchSingleCardPrice } from './market.js';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
@@ -29,7 +30,7 @@ export async function processQueue(appids, profileLink = null) {
             await fetchSCEFresh(appid);
 
             // 3. Prix marche Steam Community (priceoverview -> EUR + ventes 7j)
-            await fetchSteamMarketPrices(appid);
+            await fetchMarketPricesV2(appid);
 
             // 4. Analyse
             analyzeBadgeStatus(appid);

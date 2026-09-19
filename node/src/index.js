@@ -2,6 +2,7 @@ import { mainWorkflow, mainWorkflowGamecards, purgeAllCache, processQueue } from
 import { getAllBadgeAppids, getGame, isDBEmpty, countGames, getAllGames, getCards, getDB, getMeta } from './db.js';
 import { STEAM_PROFILE_PATH, setSteamCookie, getSteamCookie, getSteamProfilePath } from './utils.js';
 import { getSteamCookies } from './auth.js';
+import { fetchMarketPricesV2, fetchSingleCardPrice } from './market.js';
 
 const args = process.argv.slice(2);
 
