@@ -250,11 +250,14 @@ async function main() {
                     const cards = getCards(appid);
                     if (cards.length > 0) {
                         console.log(`\n  --- ${cards.length} cartes ---`);
-                        console.log('  #   nom                          qty  stock  worth  price  market€  7j  quick-trade');
-                        console.log('  --- ---------------------------- ---  -----  ------  -----  -------  --  ----------');
+                        console.log('  #   nom                          qty  sell€   x?  buy€    7j  median€  resolved€');
+                        console.log('  --- ---------------------------- --- ------ --- ------ --- ------- ---------');
                         for (const c of cards) {
-                            const priceStr = c.steam_market_price_eur !== null ? c.steam_market_price_eur.toFixed(2) + '€' : 'N/A';
-                            console.log(`  ${String(c.card_index ?? '?').padStart(3)} ${(c.name || '').substring(0, 28).padEnd(28)} ${String(c.qty).padStart(3)}  ${String(c.sce_stock).padStart(5)}  ${String(c.sce_worth).padStart(6)}  ${String(c.sce_price).padStart(5)}  ${priceStr.padStart(7)}  ${String(c.steam_market_sales_7d).padStart(2)}  ${(c.sce_quick_trade ? 'oui' : 'non').padEnd(10)}`);
+                            const sellStr = c.steam_market_sell_price_eur !== null ? c.steam_market_sell_price_eur.toFixed(2) + '€' : 'N/A';
+                            const buyStr = c.steam_market_buy_order_eur !== null ? c.steam_market_buy_order_eur.toFixed(2) + '€' : 'N/A';
+                            const medStr = c.steam_market_median_price_eur !== null ? c.steam_market_median_price_eur.toFixed(2) + '€' : 'N/A';
+                            const resStr = c.steam_market_price_eur !== null ? c.steam_market_price_eur.toFixed(2) + '€' : 'N/A';
+                            console.log(`  ${String(c.card_index ?? '?').padStart(3)} ${(c.name || '').substring(0, 28).padEnd(28)} ${String(c.qty).padStart(3)}  ${sellStr.padStart(6)} ${String(c.steam_market_sell_qty || 0).padStart(3)}  ${buyStr.padStart(6)} ${String(c.steam_market_sales_7d || 0).padStart(3)}  ${medStr.padStart(7)}  ${resStr.padStart(9)}`);
                         }
                     }
                     break;
@@ -274,8 +277,11 @@ async function main() {
                     console.log(`\n=== ${cards.length} cartes pour appid ${appid} ===\n`);
                     for (const c of cards) {
                         const priceStr = c.steam_market_price_eur !== null ? c.steam_market_price_eur.toFixed(2) + '€' : 'N/A';
+                        const sellStr = c.steam_market_sell_price_eur !== null ? c.steam_market_sell_price_eur.toFixed(2) + '€' : 'N/A';
+                        const buyStr = c.steam_market_buy_order_eur !== null ? c.steam_market_buy_order_eur.toFixed(2) + '€' : 'N/A';
                         console.log(`  [${c.card_index ?? '?'}] ${c.name || '(sans nom)'}`);
-                        console.log(`      qty=${c.qty}  stock=${c.sce_stock}  worth=${c.sce_worth}  price=${c.sce_price}  market=${priceStr}  ventes7j=${c.steam_market_sales_7d}`);
+                        console.log(`      qty=${c.qty}  stock=${c.sce_stock}  worth=${c.sce_worth}  price=${c.sce_price}`);
+                        console.log(`      market: sell=${sellStr} x${c.steam_market_sell_qty || 0}  buy=${buyStr}  7j=${c.steam_market_sales_7d || 0} ventes  resolved=${priceStr}`);
                         if (c.inv_json && c.inv_json !== '[]') {
                             const inv = JSON.parse(c.inv_json);
                             console.log(`      inventaire: ${inv.length} entrees`);

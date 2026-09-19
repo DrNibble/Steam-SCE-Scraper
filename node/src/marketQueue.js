@@ -39,7 +39,7 @@
 
 import { getDB } from './db.js';
 import { sleep, ES_log } from './utils.js';
-import { getOrderbook, getRecentSale } from './market.js';
+import { getOrderbook, getRecentSale, getPriceOverview } from './market.js';
 
 // ═══════════════════════════════════════════════════════════════
 // Configuration du token bucket
@@ -104,6 +104,28 @@ function ensureQueueTable() {
     const db = getDB();
     db.exec(SCHEMA);
     _tableInitialized = true;
+}
+
+/**
+ * Ajoute les colonnes de marché à la table cards si elles n'existent pas.
+ * Idempotent — les ALTER TABLE qui échouent (colonne existe déjà) sont ignorés.
+ */
+function migrateCardsTable() {
+    const db = getDB();
+    const newColumns = [
+        'steam_market_sell_price_eur REAL',     // Prix de vente le plus bas (EUR)
+        'steam_market_sell_qty INTEGER',        // Quantité au prix de vente le plus bas
+        'steam_market_buy_order_eur REAL',      // Demande d'achat la plus haute (EUR)
+    ];
+    for (const col of newColumns) {
+        const colName = col.split(' ')[0];
+        try {
+            db.exec(`ALTER TABLE cards ADD COLUMN ${col}`);
+            ES_log(`[MarketQueue] Colonne ${colName} ajoutée à la table cards`);
+        } catch (e) {
+            // Colonne existe déjà
+        }
+    }
 }
 
 /**
@@ -308,63 +330,80 @@ async function processCard(item) {
     try {
         const marketHashName = item.hash;
 
-        // Étape 1 : pricehistory (ventes des 7 derniers jours)
-        const recentSale = await getRecentSale(marketHashName, 7);
+        // Variables à stocker
+        let sellPriceEur = null;      // Prix de vente le plus bas (EUR)
+        let sellQty = null;          // Quantité au prix de vente le plus bas
+        let buyOrderEur = null;      // Demande d'achat la plus haute (EUR)
+        let sales7d = 0;              // Volume de vente cumulé sur 7 jours
+        let priceEur = null;         // Dernier prix vendu si <7j, sinon buy order
 
-        let priceEur = null;
-        let sales7d = 0;
+        // Étape 1 : priceoverview — prix de vente EUR (pas d'auth)
+        const pov = await getPriceOverview(marketHashName);
+        if (pov) {
+            sellPriceEur = pov.sellPriceEur;
+        }
 
-        if (recentSale) {
-            // Vente trouvée → prix de vente (EUR)
-            priceEur = recentSale.price;
-            sales7d = recentSale.totalVolume || recentSale.salesCount;
-            ES_log(`[processCard] ${marketHashName} → vente: ${priceEur}€ (${sales7d} ventes 7j)`);
-        } else {
-            // Pas de vente → orderbook pour le buy order
-            // pricehistory a échoué ou pas de vente → on a besoin de l'orderbook
-            const orderbook = await getOrderbook(marketHashName);
+        // Étape 2 : orderbook — buy order, quantités (pas d'auth, USD)
+        const orderbook = await getOrderbook(marketHashName);
+        if (orderbook) {
+            sellQty = orderbook.sellQtyAtLowest || 0;
 
-            if (orderbook && orderbook.highestBuyOrder) {
-                // Buy order en USD → conversion approximative en EUR
-                const USD_TO_EUR = 0.92;
-                priceEur = Math.round(orderbook.highestBuyOrder * USD_TO_EUR * 100) / 100;
-                ES_log(`[processCard] ${marketHashName} → buy order: $${orderbook.highestBuyOrder} ≈ ${priceEur}€`);
-            } else {
-                ES_log(`[processCard] ${marketHashName} → aucune donnée`);
+            // Convertir le buy order USD → EUR en utilisant le ratio du prix de vente
+            if (orderbook.highestBuyOrder) {
+                if (sellPriceEur && orderbook.lowestSellOrder) {
+                    // Ratio : sellPriceEur / sellPriceUsd = taux de change effectif
+                    const exchangeRate = sellPriceEur / orderbook.lowestSellOrder;
+                    buyOrderEur = Math.round(orderbook.highestBuyOrder * exchangeRate * 100) / 100;
+                } else {
+                    // Fallback : taux fixe
+                    const USD_TO_EUR = 0.92;
+                    buyOrderEur = Math.round(orderbook.highestBuyOrder * USD_TO_EUR * 100) / 100;
+                }
             }
         }
 
-        // Mettre à jour la DB seulement si on a un prix valide
-        // (ne pas écraser un prix existant par null en cas d'erreur)
-        if (priceEur !== null) {
-            db.prepare(`
-                UPDATE cards
-                SET steam_market_price_eur = ?,
-                    steam_market_sales_7d = ?,
-                    steam_market_fetched_at = ?
-                WHERE appid = ? AND hash = ?
-            `).run(
-                priceEur,
-                sales7d,
-                Date.now(),
-                String(item.appid),
-                marketHashName
-            );
-        } else {
-            // Même sans prix, on met à jour le timestamp pour éviter de retraiter immédiatement
-            db.prepare(`
-                UPDATE cards
-                SET steam_market_fetched_at = ?
-                WHERE appid = ? AND hash = ?
-            `).run(Date.now(), String(item.appid), marketHashName);
+        // Étape 3 : pricehistory — volume 7j, dernier prix de vente (auth requise)
+        const recentSale = await getRecentSale(marketHashName, 7);
+        if (recentSale) {
+            sales7d = recentSale.totalVolume || 0;
+            // Dernier prix de vente si vente < 7j
+            priceEur = recentSale.price;
         }
+
+        // Si pas de vente récente, le prix résolu est le buy order
+        if (priceEur === null) {
+            priceEur = buyOrderEur;
+        }
+
+        ES_log(`[processCard] ${marketHashName} → sell:${sellPriceEur !== null ? sellPriceEur + '€' : 'N/A'} x${sellQty || 0} | buy:${buyOrderEur !== null ? buyOrderEur + '€' : 'N/A'} | 7j:${sales7d} ventes | resolved:${priceEur !== null ? priceEur + '€' : 'N/A'}`);
+
+        // Mettre à jour la DB
+        db.prepare(`
+            UPDATE cards
+            SET steam_market_price_eur = ?,
+                steam_market_sales_7d = ?,
+                steam_market_sell_price_eur = ?,
+                steam_market_sell_qty = ?,
+                steam_market_buy_order_eur = ?,
+                steam_market_fetched_at = ?
+            WHERE appid = ? AND hash = ?
+        `).run(
+            priceEur,
+            sales7d,
+            sellPriceEur,
+            sellQty,
+            buyOrderEur,
+            Date.now(),
+            String(item.appid),
+            marketHashName
+        );
 
         // Marquer comme done
         db.prepare('UPDATE market_queue SET status = ?, processed_at = ? WHERE id = ?')
             .run('done', Date.now(), item.id);
 
         bucket.success();
-        return { success: true, priceEur, sales7d };
+        return { success: true, priceEur, sellPriceEur, buyOrderEur, sales7d };
 
     } catch (err) {
         // Si 429, le token bucket va gérer le cooldown
@@ -400,6 +439,7 @@ export function startMarketWorker(options = {}) {
     }
 
     ensureQueueTable();
+    migrateCardsTable();
     resetStaleProcessing();
     workerRunning = true;
 

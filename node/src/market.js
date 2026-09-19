@@ -7,8 +7,9 @@
  *   - Sinon → buy order le plus haut
  *
  * Endpoints utilisés :
- *   1. /market/orderbook  — buy/sell orders (pas d'auth requise, mais cookies envoyés)
- *   2. /market/pricehistory — historique des ventes (requiert steamLoginSecure)
+ *   1. /market/priceoverview — prix de vente EUR, prix médian, volume (pas d'auth)
+ *   2. /market/orderbook  — buy/sell orders, quantités (pas d'auth requise, mais cookies envoyés)
+ *   3. /market/pricehistory — historique des ventes, volume 7j, prix médian 7j (requiert steamLoginSecure)
  *
  * Ces endpoints ne sont pas officiels/documentés par Valve.
  * Ils sont utilisés par la page Steam Community Market actuelle (SSR/React).
@@ -37,7 +38,92 @@ const MARKET_APPID = 753; // Toujours 753 pour les cartes Steam Community
 
 
 // ═══════════════════════════════════════════════════════════════
-// 1) Orderbook — buy orders (endpoint utilisé par la page Steam)
+// 0) Utilitaires
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Parse un prix Steam au format EUR (ex: "0,29€", "1 649,53€", "1.649,53€").
+ * Retourne un float en EUR, ou null si le parsing échoue.
+ */
+function parseSteamPriceEur(priceStr) {
+    if (!priceStr) return null;
+    let s = priceStr.replace(/[^\d.,]/g, ''); // Garder chiffres, points, virgules
+    if (s.includes('.') && s.includes(',')) {
+        // Les deux présents : point = milliers, virgule = décimal
+        s = s.replace(/\./g, '').replace(',', '.');
+    } else if (s.includes(',')) {
+        // Seulement virgule : décimal
+        s = s.replace(',', '.');
+    }
+    const val = parseFloat(s);
+    return isNaN(val) ? null : val;
+}
+
+/**
+ * Calcule la médiane d'un tableau de valeurs.
+ */
+function median(values) {
+    if (!values || values.length === 0) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 !== 0
+        ? sorted[mid]
+        : Math.round(((sorted[mid - 1] + sorted[mid]) / 2) * 100) / 100;
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// 1) Price Overview — prix de vente EUR, prix médian, volume (pas d'auth)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Récupère le prix de vente actuel et le prix médian depuis priceoverview.
+ *
+ * L'endpoint /market/priceoverview ne nécessite pas d'authentification
+ * et retourne les prix dans la devise demandée (currency=3 = EUR).
+ *
+ * @param {string} marketHashName - Le market_hash_name (ex: "1040420-Isolation")
+ * @returns {Promise<object|null>} - { sellPriceEur, medianPriceEur, totalVolume } ou null
+ */
+export async function getPriceOverview(marketHashName) {
+    const url = `https://steamcommunity.com/market/priceoverview/?appid=${MARKET_APPID}&market_hash_name=${encodeURIComponent(marketHashName)}&currency=3&l=english`;
+
+    try {
+        const text = await httpGet(url, {
+            cookies: getSteamCookie(),
+            accept: 'application/json',
+            retries: 3,
+            extraHeaders: { ...STEAM_AJAX_HEADERS },
+        });
+
+        if (text.trim().startsWith('<')) {
+            ES_log(`[getPriceOverview] HTML reçu pour ${marketHashName}`);
+            return null;
+        }
+
+        const data = JSON.parse(text);
+        if (!data.success) {
+            ES_log(`[getPriceOverview] success=false pour ${marketHashName}`);
+            return null;
+        }
+
+        return {
+            sellPriceEur: parseSteamPriceEur(data.lowest_price),
+            medianPriceEur: parseSteamPriceEur(data.median_price),
+            totalVolume: parseInt(data.volume) || 0,
+        };
+    } catch (err) {
+        if (err.message && err.message.includes('429')) {
+            throw err;
+        }
+        ES_log(`[getPriceOverview] Erreur pour ${marketHashName}: ${err.message}`);
+        return null;
+    }
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// 2) Orderbook — buy orders (endpoint utilisé par la page Steam)
 // ═══════════════════════════════════════════════════════════════
 
 /**
@@ -100,6 +186,10 @@ export async function getOrderbook(marketHashName) {
         const highestBuyOrderCents = data.amtMaxBuyOrder || 0;
         const lowestSellOrderCents = data.amtMinSellOrder || 0;
 
+        // Quantité au prix de vente le plus bas (rgCompactSellOrders = [prix1, qté1, prix2, qté2, ...])
+        const compactSells = data.rgCompactSellOrders || [];
+        const sellQtyAtLowest = compactSells.length >= 2 ? compactSells[1] : 0;
+
         // Convertir en EUR (approximatif — pour un prix exact, utiliser pricehistory avec currency=3)
         // Ici on garde le prix USD car orderbook est toujours en eCurrency=1
         // La conversion EUR sera faite par pricehistory si disponible
@@ -107,6 +197,7 @@ export async function getOrderbook(marketHashName) {
             highestBuyOrder: highestBuyOrderCents > 0 ? highestBuyOrderCents / 100 : null,
             highestBuyOrderCents,
             lowestSellOrder: lowestSellOrderCents > 0 ? lowestSellOrderCents / 100 : null,
+            sellQtyAtLowest,               // Quantité au prix de vente le plus bas
             totalBuyOrders: data.cBuyOrders || 0,
             totalSellOrders: data.cSellOrders || 0,
             currency: 'USD', // orderbook est toujours en USD
@@ -155,7 +246,7 @@ function parseMarketDate(dateStr) {
  *
  * @param {string} marketHashName - Le market_hash_name (ex: "616580-Servie")
  * @param {number} days - Fenêtre en jours (défaut: 7)
- * @returns {Promise<object|null>} - { price, date, volume, salesCount } ou null
+ * @returns {Promise<object|null>} - { price, date, volume, salesCount, totalVolume, medianPrice } ou null
  */
 export async function getRecentSale(marketHashName, days = 7) {
     const encodedName = encodeURIComponent(marketHashName);
@@ -221,12 +312,21 @@ export async function getRecentSale(marketHashName, days = 7) {
 
         const totalVolume = recentSales.reduce((sum, s) => sum + s.volume, 0);
 
+        // Prix médian des ventes sur 7 jours (pondéré par volume)
+        // Chaque point de vente est répété selon son volume pour le calcul
+        const allPrices = [];
+        for (const s of recentSales) {
+            for (let i = 0; i < s.volume; i++) allPrices.push(s.price);
+        }
+        const medianPrice = median(allPrices);
+
         return {
             price: lastSale.price,       // Prix en EUR (currency=3)
             date: lastSale.date,          // Timestamp ms
             volume: lastSale.volume,      // Volume de ce point
             salesCount: recentSales.length, // Nombre de points de vente dans la période
             totalVolume,                  // Volume total dans les 7 jours
+            medianPrice,                  // Prix médian pondéré sur 7 jours (EUR)
         };
     } catch (err) {
         // Propager les 429 pour que le token bucket du worker puisse réagir

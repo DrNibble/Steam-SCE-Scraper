@@ -196,18 +196,23 @@ La base `data/es_cache.sqlite` contient 5 tables :
 |-------|-------------|
 | `meta` | Cles-valeurs globales (scecredit, scePendingOffers, sceWaitTime, lasttrade) |
 | `games` | Un jeu par appid (gamename, disabled, fetched_at, set_cards, indicateurs de completion) |
-| `cards` | Cartes individuelles par jeu (nom, hash, qty, inventaire, stock SCE, prix marché EUR, ventes 7j) |
+| `cards` | Cartes individuelles par jeu (nom, hash, qty, inventaire, stock SCE, prix marché: vente, buy order, volume 7j) |
 | `badge_appids` | AppIDs decouverts sur la page badges (cache de decouverte) |
 | `market_queue` | File d'attente du worker de marché (appid, hash, priorité, statut, timestamps) |
 
 ### Logique de prix marché
 
-Pour chaque carte, le worker détermine le prix selon la logique suivante :
+Pour chaque carte, le worker récupère 3 endpoints et stocke :
 
-1. **Vente dans les 7 derniers jours** (endpoint `pricehistory`) → dernier prix de vente (EUR)
-2. **Aucune vente dans les 7 jours** (endpoint `orderbook`) → demande d'achat la plus haute (USD converti en EUR)
+| Champ | Source | Description |
+|-------|--------|-------------|
+| `steam_market_sell_price_eur` | priceoverview | Prix de vente le plus bas (EUR) |
+| `steam_market_sell_qty` | orderbook | Quantité au prix de vente le plus bas |
+| `steam_market_buy_order_eur` | orderbook | Demande d'achat la plus haute (EUR, convertie depuis USD) |
+| `steam_market_sales_7d` | pricehistory | Volume de vente cumulé sur 7 jours |
+| `steam_market_price_eur` | résolu | Dernier prix de vente si < 7j, sinon buy order |
 
-Les endpoints utilisés ne sont pas officiels/documentés par Valve mais sont ceux que la page Steam Community Market actuelle utilise en interne.
+Conversion EUR : le buy order de l'orderbook est en USD. Le taux de change effectif est calculé à partir du ratio `prix_vente_EUR / prix_vente_USD` (priceoverview / orderbook). Fallback à 0.92 si indisponible.
 
 ## Corrections de bugs du script original
 
