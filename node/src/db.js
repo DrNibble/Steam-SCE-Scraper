@@ -1,0 +1,374 @@
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.join(__dirname, '..', '.env') });
+
+const DB_PATH = path.resolve(__dirname, '..', process.env.DATABASE_PATH || '../data/es_cache.sqlite');
+
+const dbDir = path.dirname(DB_PATH);
+if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+}
+
+// Detecte le module SQLite disponible:
+// - node:sqlite (Node 22.5+, module integre, pas de compilation native)
+// - better-sqlite3 (fallback pour Node < 22.5)
+let DatabaseImpl;
+let usingNodeSQLite = false;
+try {
+    const sqliteModule = await import('node:sqlite');
+    DatabaseImpl = sqliteModule.DatabaseSync;
+    usingNodeSQLite = true;
+} catch {
+    const betterSqlite = await import('better-sqlite3');
+    DatabaseImpl = betterSqlite.default;
+}
+
+const db = new DatabaseImpl(DB_PATH);
+// node:sqlite utilise exec() pour les PRAGMA, better-sqlite3 utilise pragma()
+if (usingNodeSQLite) {
+    db.exec('PRAGMA journal_mode = WAL');
+    db.exec('PRAGMA foreign_keys = ON');
+
+    // Polyfill: node:sqlite (DatabaseSync) n'a pas de methode transaction(),
+    // contrairement a better-sqlite3. On ajoute un equivalent.
+    // db.transaction(fn) retourne une fonction qui execute fn dans une transaction:
+    // BEGIN -> fn() -> COMMIT (ou ROLLBACK si erreur).
+    db.transaction = function(fn) {
+        return function(...args) {
+            db.exec('BEGIN TRANSACTION');
+            try {
+                const result = fn.apply(this, args);
+                db.exec('COMMIT');
+                return result;
+            } catch (err) {
+                try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+                throw err;
+            }
+        };
+    };
+} else {
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
+}
+
+export const SCHEMA = `
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
+CREATE TABLE IF NOT EXISTS games (
+    appid                          TEXT PRIMARY KEY,
+    gamename                       TEXT,
+    disabled                       INTEGER DEFAULT 0,
+    fetched_at                     INTEGER,
+    lasttrade                      INTEGER,
+    set_cards                      INTEGER,
+    total_owned_qty                INTEGER DEFAULT 0,
+    is_completable_via_trade       INTEGER DEFAULT 0,
+    is_completable_via_sce         INTEGER DEFAULT 0,
+    is_completable_via_sce_wobudget INTEGER DEFAULT 0,
+    is_completable_via_sce_doublon INTEGER DEFAULT 0,
+    has_expensive_card_json        TEXT,
+    total_cost_sce                 INTEGER DEFAULT 0,
+    missing_count                  INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS cards (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    appid                     TEXT NOT NULL,
+    name                      TEXT,
+    card_index                INTEGER,
+    qty                       INTEGER DEFAULT 0,
+    hash                      TEXT,
+    icon_url                  TEXT,
+    art_url                   TEXT,
+    inv_json                  TEXT,
+    sce_stock                 INTEGER DEFAULT 0,
+    sce_worth                 INTEGER DEFAULT 0,
+    sce_price                 INTEGER DEFAULT 0,
+    sce_market_price_usd      REAL DEFAULT 0,
+    steam_market_price_eur     REAL,
+    steam_market_sales_7d      INTEGER DEFAULT 0,
+    steam_market_fetched_at    INTEGER,
+    sce_quick_trade           TEXT,
+    UNIQUE(appid, hash),
+    FOREIGN KEY(appid) REFERENCES games(appid) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS badge_appids (
+    appid     TEXT PRIMARY KEY,
+    gamename  TEXT,
+    disabled  INTEGER DEFAULT 0,
+    fetched_at INTEGER
+);
+`;
+
+export function initDB() {
+    db.exec(SCHEMA);
+
+    // --- Migrations: ajouter les colonnes si elles n'existent pas ---
+    const migrations = [
+        'ALTER TABLE cards ADD COLUMN steam_market_price_eur REAL',
+        'ALTER TABLE cards ADD COLUMN steam_market_sales_7d INTEGER DEFAULT 0',
+        'ALTER TABLE cards ADD COLUMN steam_market_fetched_at INTEGER',
+    ];
+    for (const sql of migrations) {
+        try { db.exec(sql); } catch { /* colonne deja presente */ }
+    }
+
+    const backend = usingNodeSQLite ? 'node:sqlite' : 'better-sqlite3';
+    console.log(`[DB] Base initialisee: ${DB_PATH} (backend: ${backend})`);
+    return db;
+}
+
+export function getDB() {
+    return db;
+}
+
+// --- META helpers ---
+export function getMeta(key, defaultValue = null) {
+    const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key);
+    return row ? row.value : defaultValue;
+}
+
+export function setMeta(key, value) {
+    db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, String(value));
+}
+
+// --- GAME helpers ---
+// Convertit une ligne DB (snake_case) ou un objet domaine (camelCase) en parametres DB normalises
+function normalizeGameData(data) {
+    return {
+        gamename: data.gamename ?? null,
+        disabled: data.disabled ? 1 : 0,
+        fetched_at: data.fetchedAt ?? data.fetched_at ?? null,
+        lasttrade: data.lasttrade ?? data.lasttrade ?? null,
+        set_cards: data.setCards ?? data.set_cards ?? null,
+        total_owned_qty: data.totalOwnedQty ?? data.total_owned_qty ?? 0,
+        is_completable_via_trade: (data.isCompletableViaTrade ?? data.is_completable_via_trade) ? 1 : 0,
+        is_completable_via_sce: (data.isCompletableViaSCE ?? data.is_completable_via_sce) ? 1 : 0,
+        is_completable_via_sce_wobudget: (data.isCompletableviaSCEwobudget ?? data.is_completable_via_sce_wobudget) ? 1 : 0,
+        is_completable_via_sce_doublon: (data.isCompletableviaSCEdoublon ?? data.is_completable_via_sce_doublon) ? 1 : 0,
+        has_expensive_card_json: (() => {
+            if (data.hasExpensiveCard) return JSON.stringify(data.hasExpensiveCard);
+            if (data.has_expensive_card_json) return data.has_expensive_card_json;
+            return null;
+        })(),
+        total_cost_sce: data.totalCostSCE ?? data.total_cost_sce ?? 0,
+        missing_count: data.missingCount ?? data.missing_count ?? 0,
+    };
+}
+
+export function upsertGame(appid, data) {
+    const n = normalizeGameData(data);
+    db.prepare(`
+        INSERT INTO games (appid, gamename, disabled, fetched_at, lasttrade, set_cards, total_owned_qty,
+            is_completable_via_trade, is_completable_via_sce, is_completable_via_sce_wobudget,
+            is_completable_via_sce_doublon, has_expensive_card_json, total_cost_sce, missing_count)
+        VALUES (@appid, @gamename, @disabled, @fetched_at, @lasttrade, @set_cards, @total_owned_qty,
+            @is_completable_via_trade, @is_completable_via_sce, @is_completable_via_sce_wobudget,
+            @is_completable_via_sce_doublon, @has_expensive_card_json, @total_cost_sce, @missing_count)
+        ON CONFLICT(appid) DO UPDATE SET
+            gamename=COALESCE(@gamename, gamename), disabled=@disabled, fetched_at=COALESCE(@fetched_at, fetched_at),
+            lasttrade=COALESCE(@lasttrade, lasttrade), set_cards=COALESCE(@set_cards, set_cards),
+            total_owned_qty=@total_owned_qty,
+            is_completable_via_trade=@is_completable_via_trade,
+            is_completable_via_sce=@is_completable_via_sce,
+            is_completable_via_sce_wobudget=@is_completable_via_sce_wobudget,
+            is_completable_via_sce_doublon=@is_completable_via_sce_doublon,
+            has_expensive_card_json=@has_expensive_card_json,
+            total_cost_sce=@total_cost_sce,
+            missing_count=@missing_count
+    `).run({
+        appid: String(appid),
+        ...n,
+    });
+}
+
+export function getGame(appid) {
+    return db.prepare('SELECT * FROM games WHERE appid = ?').get(String(appid));
+}
+
+export function getAllGames() {
+    return db.prepare('SELECT * FROM games ORDER BY appid').all();
+}
+
+export function countGames() {
+    return db.prepare('SELECT COUNT(*) as count FROM games').get().count;
+}
+
+export function isDBEmpty() {
+    return countGames() === 0;
+}
+
+export function getGamesWithCards() {
+    return db.prepare('SELECT * FROM games WHERE disabled = 0 ORDER BY appid').all();
+}
+
+// --- CARD helpers ---
+export function upsertCards(appid, cards) {
+    // Avant de supprimer/reinserer, on sauvegarde les prix marche Steam existants
+    // pour ne pas les perdre (ils sont recuperes separement via fetchSteamMarketPrices)
+    const existingPrices = {};
+    const existingRows = db.prepare('SELECT hash, steam_market_price_eur, steam_market_sales_7d, steam_market_fetched_at FROM cards WHERE appid = ?').all(String(appid));
+    for (const row of existingRows) {
+        if (row.hash) {
+            existingPrices[row.hash] = {
+                price: row.steam_market_price_eur,
+                sales: row.steam_market_sales_7d,
+                fetchedAt: row.steam_market_fetched_at,
+            };
+        }
+    }
+
+    const stmt = db.prepare(`
+        INSERT INTO cards (appid, name, card_index, qty, hash, icon_url, art_url, inv_json,
+            sce_stock, sce_worth, sce_price, sce_market_price_usd,
+            steam_market_price_eur, steam_market_sales_7d, steam_market_fetched_at,
+            sce_quick_trade)
+        VALUES (@appid, @name, @card_index, @qty, @hash, @icon_url, @art_url, @inv_json,
+            @sce_stock, @sce_worth, @sce_price, @sce_market_price_usd,
+            @steam_market_price_eur, @steam_market_sales_7d, @steam_market_fetched_at,
+            @sce_quick_trade)
+        ON CONFLICT(appid, hash) DO UPDATE SET
+            name=@name, card_index=@card_index, qty=@qty, icon_url=@icon_url, art_url=@art_url,
+            inv_json=@inv_json, sce_stock=@sce_stock, sce_worth=@sce_worth, sce_price=@sce_price,
+            sce_market_price_usd=@sce_market_price_usd,
+            steam_market_price_eur=COALESCE(@steam_market_price_eur, steam_market_price_eur),
+            steam_market_sales_7d=COALESCE(@steam_market_sales_7d, steam_market_sales_7d),
+            steam_market_fetched_at=COALESCE(@steam_market_fetched_at, steam_market_fetched_at),
+            sce_quick_trade=@sce_quick_trade
+    `);
+
+    const deleteStmt = db.prepare('DELETE FROM cards WHERE appid = ?');
+
+    const transaction = db.transaction((appidStr, cardsArr) => {
+        deleteStmt.run(appidStr);
+        for (const card of cardsArr) {
+            // Recupere les prix marche existants ou utilise ceux fournis dans l'objet carte
+            const hash = card.hash || null;
+            const existing = hash ? existingPrices[hash] : null;
+            const cardPrice = card.steamMarketPriceEur ?? card.steam_market_price_eur ?? null;
+            const cardSales = card.steamMarketSales7d ?? card.steam_market_sales_7d ?? null;
+            const cardFetchedAt = card.steamMarketFetchedAt ?? card.steam_market_fetched_at ?? null;
+
+            stmt.run({
+                appid: appidStr,
+                name: card.name || null,
+                card_index: card.index ?? null,
+                qty: card.qty || 0,
+                hash: hash,
+                icon_url: card.iconUrl || null,
+                art_url: card.artUrl || null,
+                inv_json: card.inv ? JSON.stringify(card.inv) : '[]',
+                sce_stock: card['sce stock'] || 0,
+                sce_worth: card['sce worth'] || 0,
+                sce_price: card['sce price'] || 0,
+                sce_market_price_usd: card['sce marketPriceUSD'] || 0,
+                // Preserve existing market prices if not provided in card object
+                steam_market_price_eur: cardPrice ?? existing?.price ?? null,
+                steam_market_sales_7d: cardSales ?? existing?.sales ?? 0,
+                steam_market_fetched_at: cardFetchedAt ?? existing?.fetchedAt ?? null,
+                sce_quick_trade: card['sce quick-trade'] || null,
+            });
+        }
+    });
+
+    transaction(String(appid), cards);
+}
+
+export function getCards(appid) {
+    return db.prepare('SELECT * FROM cards WHERE appid = ? ORDER BY card_index').all(String(appid));
+}
+
+// --- STEAM MARKET PRICE helpers ---
+/**
+ * Met a jour le prix marche Steam pour une carte donnee
+ * @param {string} appid
+ * @param {string} hash - market hash de la carte (sans "(trading card)")
+ * @param {number|null} priceEur - prix en EUR (null si inconnu)
+ * @param {number} sales7d - nombre de ventes dans les 7 derniers jours
+ */
+export function updateCardMarketPrice(appid, hash, priceEur, sales7d) {
+    db.prepare(`
+        UPDATE cards
+        SET steam_market_price_eur = ?, steam_market_sales_7d = ?, steam_market_fetched_at = ?
+        WHERE appid = ? AND hash = ?
+    `).run(
+        priceEur !== null && priceEur !== undefined ? priceEur : null,
+        sales7d || 0,
+        Date.now(),
+        String(appid),
+        hash
+    );
+}
+
+/**
+ * Met a jour les prix marche Steam pour toutes les cartes d'un jeu
+ * @param {string} appid
+ * @param {Map} priceMap - Map<hash, {priceEur, sales7d}>
+ */
+export function updateCardMarketPrices(appid, priceMap) {
+    const stmt = db.prepare(`
+        UPDATE cards
+        SET steam_market_price_eur = ?, steam_market_sales_7d = ?, steam_market_fetched_at = ?
+        WHERE appid = ? AND hash = ?
+    `);
+    const transaction = db.transaction((appidStr, map) => {
+        const now = Date.now();
+        for (const [hash, data] of map) {
+            stmt.run(
+                data.priceEur !== null && data.priceEur !== undefined ? data.priceEur : null,
+                data.sales7d || 0,
+                now,
+                appidStr,
+                hash
+            );
+        }
+    });
+    transaction(String(appid), priceMap);
+}
+
+// --- BADGE APPIDS helpers ---
+export function upsertBadgeAppid(appid, gamename, disabled = false) {
+    db.prepare(`
+        INSERT INTO badge_appids (appid, gamename, disabled)
+        VALUES (?, ?, ?)
+        ON CONFLICT(appid) DO UPDATE SET gamename=excluded.gamename, disabled=excluded.disabled
+    `).run(String(appid), gamename || null, disabled ? 1 : 0);
+}
+
+export function getAllBadgeAppids() {
+    return db.prepare('SELECT * FROM badge_appids ORDER BY appid').all();
+}
+
+export function getBadgeAppid(appid) {
+    return db.prepare('SELECT * FROM badge_appids WHERE appid = ?').get(String(appid));
+}
+
+export function getIncompleteBadgeAppids() {
+    return db.prepare(`
+        SELECT ba.* FROM badge_appids ba
+        LEFT JOIN games g ON ba.appid = g.appid
+        WHERE ba.disabled = 0 AND (g.appid IS NULL OR g.fetched_at IS NULL OR g.set_cards IS NULL OR g.set_cards = 0)
+    `).all();
+}
+
+export function purgeCache() {
+    db.prepare('DELETE FROM games').run();
+    db.prepare('DELETE FROM cards').run();
+    db.prepare('DELETE FROM badge_appids').run();
+    db.prepare('DELETE FROM meta').run();
+    setMeta('scecredit', '0');
+    console.log('[DB] Cache purge.');
+}
+
+// Initialise automatiquement au chargement du module
+initDB();
+
+export default db;

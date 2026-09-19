@@ -1,0 +1,29 @@
+{
+  "name": "steam-sce-scraper",
+  "version": "1.2.0",
+  "description": "Scraper Steam & Steam Card Exchange avec cache SQLite (node:sqlite) et auth steam-session",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "init-db": "node src/db.js",
+    "sync": "node src/index.js",
+    "sync:badges": "node src/index.js --badges",
+    "sync:gamecards": "node src/index.js --gamecards",
+    "sync:history": "node src/index.js --history",
+    "login": "node src/index.js --login",
+    "login:qr": "node src/index.js --login qr",
+    "login:password": "node src/index.js --login password",
+    "db": "node src/index.js --db",
+    "refetch-cards": "node src/index.js --refetch-cards",
+    "scan-all": "node src/index.js --scan-all",
+    "status": "node src/index.js --status",
+    "purge": "node src/index.js --purge",
+    "sync-once": "node src/index.js --sync-once"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "steam-market": "^3.0.4",
+    "steam-session": "^1.9.0"
+  }
+}
