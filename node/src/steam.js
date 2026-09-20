@@ -1,6 +1,6 @@
 import * as cheerio from 'cheerio';
 import { httpGet, httpGetJSON, clean, isSteamEvent, sleep, parseSteamDateToMs, getSteamCookie, getSteamProfilePath, extractSessionIdFromCookies, INVENTORY_PAGE_DELAY, ES_log } from './utils.js';
-import { upsertBadgeAppid, upsertGame, upsertCards, getMeta, setMeta, getGame, getBadgeAppid, getCards, updateCardMarketPrices } from './db.js';
+import { upsertBadgeAppid, upsertGame, upsertCards, getMeta, setMeta, getGame, getBadgeAppid, getCards, updateCardMarketPrices, setGameBadgeCrafted } from './db.js';
 
 // Cookie Steam dynamique (recupere via auth.js ou .env)
 function steamCookie() { return getSteamCookie(); }
@@ -169,8 +169,49 @@ export async function fillInventoryData(cards, profileLink = null) {
     }
 }
 
+// Compte PRINCIPAL dont on verifie si le badge a deja ete genere (peu importe le niveau).
+// Ce n est PAS le compte scrape (inventory/SCE) : le compte principal est identifie
+// par son URL personnalisee (id/Dr_Nibble => SteamID64 76561198028880269).
+// Surchargeable via la variable d environnement BADGE_PROFILE_PATH.
+const BADGE_PROFILE_PATH = process.env.BADGE_PROFILE_PATH || 'id/Dr_Nibble';
+
 /**
- * Recupere les donnees Steam pour un badge (cartes du set)
+ * Verifie sur la page gamecards si le badge d un jeu a deja ete genere (crafte)
+ * par le compte PRINCIPAL (BADGE_PROFILE_PATH), peu importe le niveau.
+ * - Badge crafte : la page contient "badge_info_unlocked" (badge obtenu + date de deblocage)
+ *   et/ou "badge_icon" (image du badge crafte, ex: "Level 2, 200 XP")
+ * - Badge non crafte : la page contient "badge_empty_circle" (ex: "Niveau 0 - X cartes collectees sur Y")
+ * @param {string} appid
+ * @param {string|null} profileLink - optionnel: autre profil a verifier (defaut: compte principal)
+ * @returns {Promise<boolean|null>} true = deja genere, false = pas encore, null = indetermine (erreur)
+ */
+export async function fetchBadgeCrafted(appid, profileLink = null) {
+    const pl = profileLink || BADGE_PROFILE_PATH;
+    if (isSteamEvent(appid)) return null;
+
+    const url = `https://steamcommunity.com/${pl}/gamecards/${appid}`;
+    try {
+        const html = await httpGet(url, { cookies: steamCookie(), retries: 2 });
+        if (!html) return null;
+        // Garde-fou : si le compte n a aucune carte pour ce jeu, Steam redirige vers
+        // la page /badges (remplie de badges crafte -> faux positif). On verifie donc
+        // que la page recue est bien une page gamecards avant d appliquer les marqueurs.
+        if (!html.includes('badge_gamecard_page')) return null;
+        // Badge crafte : la page montre le badge obtenu (image + date de deblocage).
+        // On teste ces marqueurs AVANT le cercle vide car un badge de niveau partiel
+        // affiche a la fois le badge crafte et le cercle vide du niveau suivant.
+        if (html.includes('badge_info_unlocked') || html.includes('badge_icon')) return true;
+        // Badge non crafte : cercle vide (ex: "Niveau 0 - X cartes collectees sur Y")
+        if (html.includes('badge_empty_circle')) return false;
+        return null;
+    } catch (e) {
+        ES_log(`[fetchBadgeCrafted] Erreur pour ${appid}: ${e.message}`);
+        return null;
+    }
+}
+
+/**
+ * Recupere les donnees Steam pour un badge (cartes du set) + statut badge crafte
  * @param {string} appid
  * @param {string} profileLink
  * @param {number} retries
@@ -226,6 +267,12 @@ export async function fetchSteamData(appid, profileLink = null, retries = 3) {
         // Sauvegarde en DB
         upsertGame(appid, gameData);
         upsertCards(appid, cards);
+
+        // Badge deja genere par le COMPTE PRINCIPAL ? (best-effort : on garde la valeur existante si indetermine)
+        const badgeCrafted = await fetchBadgeCrafted(appid);
+        if (badgeCrafted !== null) {
+            setGameBadgeCrafted(appid, badgeCrafted);
+        }
 
         return { ...gameData, cards };
     } catch (error) {

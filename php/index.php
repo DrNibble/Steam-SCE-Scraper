@@ -21,24 +21,34 @@ foreach ($allGames as $g) {
     if ($g['has_expensive_card_json']) {
         $exp = json_decode($g['has_expensive_card_json'], true);
         if ($exp && !empty($exp['isOwned'])) {
-            // Pre-fetch asset ID
+            // Pre-fetch asset ID + ligne carte (pour prix derniere vente <7j)
             $cards = getCardsForGame($db, $g['appid']);
             $assetId = null;
+            $cardRow = null;
             foreach ($cards as $c) {
-                if ($c['name'] === $exp['cardname'] && !empty($c['inv'])) {
-                    $assetId = $c['inv'][0]['id'] ?? null;
-                    break;
+                if ($c['name'] === $exp['cardname']) {
+                    $cardRow = $c;
+                    if (!empty($c['inv'])) {
+                        $assetId = $c['inv'][0]['id'] ?? null;
+                        break;
+                    }
                 }
             }
             $exp['_assetId'] = $assetId;
+            $exp['_card'] = $cardRow;
+
+            // Cartes sans vente < 7j : on n affiche pas la ligne
+            if ($cardRow !== null && (int)($cardRow['steam_market_sales_7d'] ?? 0) === 0) {
+                continue;
+            }
             $g['_expensive'] = $exp;
             $expensiveList[] = $g;
         }
     }
 }
 usort($expensiveList, function($a, $b) {
-    $pa = (float)($a['_expensive']['marketeurprice'] ?? 0);
-    $pb = (float)($b['_expensive']['marketeurprice'] ?? 0);
+    $pa = (float)($a['_expensive']['_card']['steam_market_price_eur'] ?? 0);
+    $pb = (float)($b['_expensive']['_card']['steam_market_price_eur'] ?? 0);
     return $pb <=> $pa;
 });
 
@@ -84,9 +94,19 @@ foreach ($games as $g) {
             'gap' => $gap,
             'collectable' => $cardsToBuy,
             'totalCost' => $totalCost,
+            'badgeCrafted' => ($g['badge_crafted'] === null ? null : (int)$g['badge_crafted']),
         ];
     }
 }
+
+// Tri : badges deja generes en fin de liste, puis peu de cartes restantes d abord
+usort($completableSceList, function($a, $b) {
+    // NULL (non verifie) est trie comme 0 : en tete avec les badges a generer
+    if (($a['badgeCrafted'] ?? 0) !== ($b['badgeCrafted'] ?? 0)) {
+        return ($a['badgeCrafted'] ?? 0) <=> ($b['badgeCrafted'] ?? 0);
+    }
+    return $a['gap'] <=> $b['gap'];
+});
 
 // --- 3. FILTRE: DEPOT ---
 $depositList = [];
@@ -229,7 +249,7 @@ $profileLink = STEAM_PROFILE_PATH;
         <?php else: ?>
         <table>
             <thead>
-                <tr><th>Jeu</th><th>Carte</th><th>Prix Market</th></tr>
+                <tr><th>Jeu</th><th>Carte</th><th>Dernière vente</th></tr>
             </thead>
             <tbody>
                 <?php foreach ($expensiveList as $g):
@@ -251,7 +271,16 @@ $profileLink = STEAM_PROFILE_PATH;
                             <?= e($exp['cardname']) ?>
                         <?php endif; ?>
                     </td>
-                    <td class="price"><?= fmtEur($exp['marketeurprice']) ?></td>
+                    <td class="price">
+                        <?php if (!empty($exp['_card']) && hasRecentSales($exp['_card'])): ?>
+                            <?= fmtEur($exp['_card']['steam_market_price_eur']) ?>
+                            <br><small>Vente < 7j</small>
+                        <?php elseif (!empty($exp['_card']) && (int)($exp['_card']['steam_market_sales_7d'] ?? 0) === 0): ?>
+                            <span class="stale">Pas de vente < 7j</span>
+                        <?php else: ?>
+                            <span class="stale">Vente < 7j non confirmee</span>
+                        <?php endif; ?>
+                    </td>
                 </tr>
                 <?php endforeach; ?>
             </tbody>
@@ -276,6 +305,11 @@ $profileLink = STEAM_PROFILE_PATH;
                         <a href="https://steamcommunity.com/<?= e($profileLink) ?>/gamecards/<?= e($g['appid']) ?>/" target="_blank" class="game-link">
                             <?= e($g['name']) ?>
                         </a>
+                        <?php if ($g['badgeCrafted'] === 1): ?>
+                            <br><small style="color:#ff9d00;">Badge deja genere</small>
+                        <?php elseif ($g['badgeCrafted'] === null): ?>
+                            <br><small style="color:#8f98a0;">Badge non verifie (lancer un scan)</small>
+                        <?php endif; ?>
                         <br><small>Possedees: <?= fmt($g['ownedTotal']) ?> / <?= fmt($g['setCards']) ?></small>
                     </td>
                     <td>
@@ -294,7 +328,7 @@ $profileLink = STEAM_PROFILE_PATH;
                                 <?= $item['count'] > 1 ? '<b>(x' . fmt($item['count']) . ')</b>' : '' ?>
                                 [<?= fmt($c['sce_price']) ?>c]
                                 <?php if (hasRecentSales($c)): ?>
-                                    <small style="color:#8f98a0;"> (<?= fmtEur($c['steam_market_price_eur']) ?>)</small>
+                                    <small style="color:#8f98a0;"> Vente < 7j : <?= fmtEur($c['steam_market_price_eur']) ?></small>
                                 <?php endif; ?>
                             </a>
                         <?php endforeach; ?>
@@ -362,10 +396,14 @@ $profileLink = STEAM_PROFILE_PATH;
         <?php endif; ?>
     </section>
 
-    <!-- Section: Badges desactives -->
+    <!-- Section: Badges desactives (repliable) -->
     <?php if (!empty($disabledTradeInList)): ?>
-    <section class="section-disabled">
-        <h2>Badges Trade-In Desactive</h2>
+    <details class="section section-disabled" close>
+        <summary>
+            <h2>Badges Trade-In Desactive</h2>
+            <span class="summary-count"><?= fmt(count($disabledTradeInList)) ?> jeu<?= count($disabledTradeInList) > 1 ? 'x' : '' ?></span>
+            <span class="summary-hint">(cliquer pour replier / deplier)</span>
+        </summary>
         <table>
             <thead>
                 <tr><th>Jeu</th><th>Cartes en stock complet (Stock &ge; 8)</th></tr>
@@ -387,7 +425,7 @@ $profileLink = STEAM_PROFILE_PATH;
                 <?php endforeach; ?>
             </tbody>
         </table>
-    </section>
+    </details>
     <?php endif; ?>
 
     <footer>

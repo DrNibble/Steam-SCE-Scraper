@@ -58,6 +58,67 @@ section {
     background: #3a2e1d;
 }
 
+/* Section repliable (details/summary) */
+details.section {
+    background: #2a475e;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+    border: 1px solid #3d6b8a;
+}
+
+details.section.section-disabled {
+    border: 1px solid #ff9d00;
+    background: #3a2e1d;
+}
+
+details.section > summary {
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+}
+
+details.section > summary::-webkit-details-marker {
+    display: none;
+}
+
+details.section > summary::after {
+    content: "▼";
+    color: #66c0f4;
+    font-size: 0.8em;
+    margin-left: 10px;
+}
+
+details.section:not([open]) > summary::after {
+    content: "▶";
+}
+
+details.section > summary h2 {
+    display: inline;
+    margin: 0;
+}
+
+.summary-count {
+    color: #ff9d00;
+    font-weight: bold;
+    margin-left: 8px;
+    font-size: 0.95em;
+}
+
+.summary-hint {
+    color: #8f98a0;
+    font-size: 0.8em;
+    font-style: italic;
+    margin-left: 8px;
+}
+
+.stale {
+    color: #8f98a0;
+    font-style: italic;
+    font-weight: normal;
+}
+
 h2 {
     color: #ffffff;
     margin-top: 0;

@@ -75,7 +75,8 @@ CREATE TABLE IF NOT EXISTS games (
     is_completable_via_sce_doublon INTEGER DEFAULT 0,
     has_expensive_card_json        TEXT,
     total_cost_sce                 INTEGER DEFAULT 0,
-    missing_count                  INTEGER DEFAULT 0
+    missing_count                  INTEGER DEFAULT 0,
+    badge_crafted                  INTEGER          -- NULL = pas encore verifie, 0 = pas de badge, 1 = badge deja genere
 );
 
 CREATE TABLE IF NOT EXISTS cards (
@@ -116,6 +117,8 @@ export function initDB() {
         'ALTER TABLE cards ADD COLUMN steam_market_price_eur REAL',
         'ALTER TABLE cards ADD COLUMN steam_market_sales_7d INTEGER DEFAULT 0',
         'ALTER TABLE cards ADD COLUMN steam_market_fetched_at INTEGER',
+        // NULL par defaut : distingue "pas encore verifie" (NULL) de "verifie sans badge" (0)
+        'ALTER TABLE games ADD COLUMN badge_crafted INTEGER',
     ];
     for (const sql of migrations) {
         try { db.exec(sql); } catch { /* colonne deja presente */ }
@@ -208,6 +211,15 @@ export function isDBEmpty() {
 
 export function getGamesWithCards() {
     return db.prepare('SELECT * FROM games WHERE disabled = 0 ORDER BY appid').all();
+}
+
+/**
+ * Met a jour le statut "badge deja genere" d un jeu
+ * @param {string} appid
+ * @param {boolean} crafted - true si le badge a ete crafte par le profil
+ */
+export function setGameBadgeCrafted(appid, crafted) {
+    db.prepare('UPDATE games SET badge_crafted = ? WHERE appid = ?').run(crafted ? 1 : 0, String(appid));
 }
 
 // --- CARD helpers ---
