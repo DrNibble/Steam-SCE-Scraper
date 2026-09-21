@@ -188,23 +188,116 @@ async function _fetchSCEGlobalInfoInner() {
 }
 
 /**
- * Verifie si le trade-in SCE est desactive pour un appid
- * (remplace l'ancienne fonction fetchSCEMarketPrices qui recuperait aussi les prix USD)
+ * Recupere le HTML de la gamepage SCE pour un appid.
+ * Retourne null si la page est invalide ou si le trade-in est desactive.
+ * (Remplace l'ancienne fonction checkSCEDisabled: la page recuperee est
+ * aussi utilisee pour extraire les prix USD des cartes.)
  */
-async function checkSCEDisabled(appid) {
+async function fetchSCEGamePage(appid) {
     const html = await httpGet(`https://www.steamcardexchange.net/index.php?gamepage-appid-${appid}/`, { cookies: getSCECookie() });
 
     if (!html || html.includes('Trade-in disabled')) {
-        return true;
+        return null;
     }
 
     const $ = cheerio.load(html);
     const tradingCardsHeader = $('#series-1-cards').closest('div.bg-gray-dark');
     if (tradingCardsHeader.length === 0) {
-        return true;
+        return null;
     }
 
-    return false;
+    return html;
+}
+
+/**
+ * Parse les prix USD des cartes depuis le HTML d'une gamepage SCE.
+ * Seule la section "Trading Cards" (#series-1-cards) est prise en compte
+ * (pas les foils, backgrounds ni emojis).
+ * Chaque bloc carte contient:
+ *   <div class="text-sm text-center break-words">Undead Boss</div>
+ *   <a href="https://steamcommunity.com/market/listings/753/..." class="mt-auto btn-primary">Price: $0.38</a>
+ * @param {string} html - HTML de la gamepage (index.php?gamepage-appid-N)
+ * @returns {Object} Map nom nettoye -> prix USD (float)
+ */
+export function parseSCEGamePrices(html) {
+    const $ = cheerio.load(html);
+    const priceMap = {};
+
+    // En-tete de la section "Trading Cards" (#series-1-cards)
+    const sectionHeader = $('#series-1-cards').closest('div.bg-gray-dark');
+    if (sectionHeader.length === 0) return priceMap;
+
+    // La grille des cartes suit l'en-tete de section
+    const grid = sectionHeader.next('div.grid');
+    if (grid.length === 0) return priceMap;
+
+    grid.find('div.flex.flex-col').each((_, block) => {
+        const $block = $(block);
+        const nameEl = $block.find('div.text-sm.text-center.break-words');
+        const priceLink = $block.find('a.btn-primary');
+        if (nameEl.length === 0 || priceLink.length === 0) return;
+
+        const match = priceLink.text().match(/Price:\s*\$([\d.,]+)/i);
+        if (!match) return;
+
+        const price = parseFloat(match[1].replace(/,/g, ''));
+        if (isNaN(price)) return;
+
+        priceMap[clean(nameEl.text().trim(), true)] = price;
+    });
+
+    return priceMap;
+}
+
+// Taux de conversion USD -> EUR par defaut (fallback si l'API est injoignable
+// et aucun taux en cache). Surchargeable via SCE_USD_TO_EUR dans .env.
+const DEFAULT_USD_TO_EUR = 0.92;
+let _usdToEurPromise = null;
+
+/**
+ * Retourne le taux de conversion USD -> EUR.
+ * Priorite: override manuel via SCE_USD_TO_EUR (env), puis taux de l'API
+ * Frankfurter (BCE) mis en cache 24h en meta 'usdToEur', puis dernier taux
+ * en cache, sinon DEFAULT_USD_TO_EUR.
+ * @returns {Promise<number>}
+ */
+export async function getUSDtoEUR() {
+    // Override manuel via .env (valeur invalide ignoree)
+    const envRate = parseFloat(process.env.SCE_USD_TO_EUR || '');
+    if (envRate > 0) return envRate;
+
+    const cached = parseFloat(getMeta('usdToEur', '0')) || 0;
+    const fetchedAt = parseInt(getMeta('usdToEurFetchedAt', '0'), 10) || 0;
+    const DAY_MS = 24 * 60 * 60 * 1000;
+
+    // Cache valide moins de 24h
+    if (cached > 0 && (Date.now() - fetchedAt) < DAY_MS) return cached;
+
+    // Une seule requete a la fois (workers paralleles)
+    if (_usdToEurPromise) return _usdToEurPromise;
+
+    _usdToEurPromise = (async () => {
+        try {
+            const text = await httpGet('https://api.frankfurter.app/latest?from=USD&to=EUR');
+            const data = JSON.parse(text);
+            const rate = data && data.rates ? parseFloat(data.rates.EUR) : NaN;
+            if (rate > 0) {
+                setMeta('usdToEur', String(rate));
+                setMeta('usdToEurFetchedAt', String(Date.now()));
+                return rate;
+            }
+        } catch (e) {
+            ES_log(`[getUSDtoEUR] Erreur recuperation taux USD/EUR: ${e.message}`);
+        }
+        if (cached > 0) {
+            ES_log(`[getUSDtoEUR] API injoignable, utilisation du taux en cache: ${cached}`);
+            return cached;
+        }
+        ES_log(`[getUSDtoEUR] Fallback sur le taux par defaut: ${DEFAULT_USD_TO_EUR}`);
+        return DEFAULT_USD_TO_EUR;
+    })().finally(() => { _usdToEurPromise = null; });
+
+    return _usdToEurPromise;
 }
 
 /**
@@ -302,23 +395,33 @@ export async function fetchSCEFresh(appid) {
 
     if (existingGame.disabled) return null;
 
-    // 1. Verifier si le trade-in est desactive sur SCE
-    const sceDisabled = await checkSCEDisabled(appid);
-    if (sceDisabled) {
+    // 1. Recuperer la gamepage SCE (verifie au passage si le trade-in est
+    //    desactive) et en extraire les prix USD des cartes
+    //    (section "Trading Cards" #series-1-cards uniquement)
+    const gamePageHtml = await fetchSCEGamePage(appid);
+    if (!gamePageHtml) {
         ES_log(`[fetchSCEFresh] Trade-in desactive pour ${appid}.`);
         upsertGame(appid, { ...existingGame, disabled: true });
         return null;
     }
+    const gamePriceMap = parseSCEGamePrices(gamePageHtml);
+    ES_log(`[fetchSCEFresh] ${Object.keys(gamePriceMap).length} prix USD extraits de la gamepage.`);
 
     // 2. Inventaire SCE
     const inventoryMap = await fetchSCEInventory(appid);
 
-    // 3. Fusion dans les cartes (les prix marche Steam sont recuperes separement via fetchSteamMarketPrices)
+    // 3. Taux USD -> EUR pour stocker le prix SCE converti en euros
+    const usdToEur = await getUSDtoEUR();
+
+    // 4. Fusion dans les cartes (les prix marche Steam sont affines ensuite
+    //    par fetchMarketPricesV2, phase 2)
     const dbCards = getCards(appid);
     const cards = dbCards.map(dbCard => {
         const inv = JSON.parse(dbCard.inv_json || '[]');
         const normName = clean(dbCard.name, true);
         const invData = inventoryMap[normName] || {};
+        // Prix USD de la gamepage SCE (section Trading Cards)
+        const priceUSD = gamePriceMap[normName] || 0;
 
         return {
             name: dbCard.name,
@@ -331,7 +434,10 @@ export async function fetchSCEFresh(appid) {
             'sce stock': invData.stock || 0,
             'sce worth': invData.worth || 0,
             'sce price': invData.price || 0,
-            'sce marketPriceUSD': 0, // Deprecated: prix maintenant recuperes via Steam Market
+            'sce marketPriceUSD': priceUSD,
+            // Prix SCE converti en EUR, stocke dans steam_market_price_eur
+            // (null si pas de prix -> conserve la valeur existante en DB)
+            steamMarketPriceEur: priceUSD > 0 ? Math.round(priceUSD * usdToEur * 100) / 100 : null,
             'sce quick-trade': invData.quickTrade || ''
         };
     });
