@@ -1,6 +1,6 @@
 import { sleep, isSteamEvent, ES_log, getSteamProfilePath, setSteamCookie, getSteamCookie, httpGet } from './utils.js';
 import { getPageAppids, getAllPagesAppids, fetchSteamData, syncSteamInventoryHistory } from './steam.js';
-import { fetchSCEFresh, fetchSCEGlobalInfo, resetCreditFlag } from './sce.js';
+import { fetchSCEFresh, fetchSCEGlobalInfo, isSCEBusy, resetCreditFlag } from './sce.js';
 import { analyzeBadgeStatus } from './analyze.js';
 import { getAllBadgeAppids, getIncompleteBadgeAppids, getGame, purgeCache, getMeta, setMeta, isDBEmpty, countGames } from './db.js';
 import { getSteamCookies } from './auth.js';
@@ -30,10 +30,15 @@ export async function processQueue(appids, profileLink = null, options = {}) {
     const { market = true } = options;
     const pl = profileLink || getSteamProfilePath();
     const dbReadyAppids = [];
+    const deferredAppids = [];
 
-    // Recupere le waitTime SCE AVANT la boucle (fetchSCEGlobalInfo est mis en
-    // cache via le flag creditFetched: aucune requete supplementaire lors du
-    // premier fetchSCEFresh, qui l'appelle aussi)
+    // Recupere le waitTime SCE AVANT la boucle. resetCreditFlag() force le
+    // re-fetch du profile SCE (sinon, en daemon, le waitTime/pendingOffers du
+    // cycle precedent serait reutilise via le flag creditFetched et les
+    // badges differes ne seraient jamais re-evalues).
+    // Ensuite fetchSCEGlobalInfo est mis en cache via ce meme flag: aucune
+    // requete supplementaire lors du premier fetchSCEFresh, qui l'appelle aussi
+    resetCreditFlag();
     await fetchSCEGlobalInfo();
     const waitTime = getSCEWaitTime();
     const parallel = (waitTime < SCE_PARALLEL_WAITTIME_MAX) ? SCE_PARALLEL_TASKS : 1;
@@ -56,6 +61,14 @@ export async function processQueue(appids, profileLink = null, options = {}) {
             // 2. Scrap SCE (stock + worth + price + quick-trade)
             await fetchSCEFresh(appid);
 
+            // File SCE saturee (waitTime > 1 min et pendingOffers > 10):
+            // l'appid est differe, il sera retente au prochain sync (10 min).
+            // Pas d'analyse ni de prix marche pour lui ce cycle.
+            if (isSCEBusy()) {
+                deferredAppids.push(appid);
+                continue;
+            }
+
             // 3. Analyse
             analyzeBadgeStatus(appid);
 
@@ -73,9 +86,18 @@ export async function processQueue(appids, profileLink = null, options = {}) {
 
     await Promise.all(Array.from({ length: parallel }, () => worker()));
 
+    // Appids differes (file SCE saturee): conserves en meta pour etre retentes
+    // au prochain sync (cycle de surveillance toutes les 10 min). Ceux qui ont
+    // reussi ce cycle (dbReadyAppids) sont retires de la liste.
+    const prevDeferred = getDeferredSCEAppids().filter(a => !dbReadyAppids.includes(a));
+    saveDeferredSCEAppids([...new Set([...prevDeferred, ...deferredAppids])]);
+    if (deferredAppids.length > 0) {
+        console.log(`[processQueue] ${deferredAppids.length} badge(s) differe(s): file SCE saturee (waitTime > 1 min, pendingOffers > 10). Nouvel essai au prochain sync.`);
+    }
+
     // Prix marche Steam: phase sequentielle, uniquement APRES que tous les
-    // badges soient a jour en DB via fetchSCEInventory. Les appids dont le
-    // scan a echoue sont exclus (dbReadyAppids).
+    // badges soient a jour en DB via fetchSCEInventory. Les appids differes
+    // (file SCE saturee) ou dont le scan a echoue sont exclus (dbReadyAppids).
     if (market) {
         await runMarketPhase(dbReadyAppids);
     }
@@ -91,6 +113,28 @@ export async function processQueue(appids, profileLink = null, options = {}) {
  */
 export function getSCEWaitTime() {
     return parseFloat(getMeta('sceWaitTime', '0')) || 0;
+}
+
+/** Cle meta pour la liste des appids differes (file SCE saturee). */
+const DEFERRED_SCE_META_KEY = 'sceDeferredAppids';
+
+/**
+ * Retourne les appids differes car la file SCE etait saturee
+ * (waitTime > 1 min et pendingOffers > 10). Ils sont retentes par le
+ * daemon a chaque cycle de surveillance (toutes les 10 minutes).
+ * @returns {Array<string>}
+ */
+export function getDeferredSCEAppids() {
+    try {
+        const v = JSON.parse(getMeta(DEFERRED_SCE_META_KEY, '[]'));
+        return Array.isArray(v) ? v : [];
+    } catch {
+        return [];
+    }
+}
+
+function saveDeferredSCEAppids(appids) {
+    setMeta(DEFERRED_SCE_META_KEY, JSON.stringify([...new Set(appids)]));
 }
 
 /**
@@ -153,8 +197,9 @@ export async function syncBadgesWorkflow(profileLink = null) {
 
     const failed = appids.filter(a => !dbReadyAppids.includes(a));
     if (failed.length > 0) {
-        console.warn(`[syncBadgesWorkflow] ATTENTION: ${failed.length} badge(s) non a jour en DB: ${failed.join(', ')}`);
+        console.warn(`[syncBadgesWorkflow] ATTENTION: ${failed.length} badge(s) non a jour en DB (echec ou file SCE saturee): ${failed.join(', ')}`);
         console.warn('[syncBadgesWorkflow] La phase prix marche ne sera executee que sur les badges a jour.');
+        console.warn('[syncBadgesWorkflow] Les badges deferres (file SCE saturee) seront retentes au prochain sync (10 min).');
     }
 
     // 3. Phase 2: prix marche Steam, uniquement pour les badges a jour en DB
@@ -273,13 +318,21 @@ export async function mainWorkflow(profileLink = null) {
 
         try {
             const updatedAppIds = await syncSteamInventoryHistory(pl);
-            
-            // Si des trades nouveaux ont ete detectes, re-scan des jeux concernes
-            // (inventaire + SCE + prix marché + analyse) avec délai réduit à 500ms
-            if (updatedAppIds && updatedAppIds.length > 0) {
-                console.log(`[Workflow] ${updatedAppIds.length} jeu(x) avec nouveau trade. Re-scan...`);
-                await processQueue(updatedAppIds, pl);
-                console.log(`[Workflow] Re-scan termine pour ${updatedAppIds.length} jeu(x).`);
+
+            // Badges differes au cycle precedent (file SCE saturee:
+            // waitTime > 1 min et pendingOffers > 10): nouvel essai
+            const deferredAppIds = getDeferredSCEAppids();
+            if (deferredAppIds.length > 0) {
+                console.log(`[Workflow] ${deferredAppIds.length} badge(s) differe(s) au cycle precedent (file SCE saturee). Nouvel essai...`);
+            }
+
+            // Si des trades nouveaux ont ete detectes (ou des badges differes),
+            // re-scan des jeux concernes (délai réduit à 500ms)
+            const appIdsToRescan = [...new Set([...(updatedAppIds || []), ...deferredAppIds])];
+            if (appIdsToRescan.length > 0) {
+                console.log(`[Workflow] ${appIdsToRescan.length} jeu(x) a re-scanner. Re-scan...`);
+                await processQueue(appIdsToRescan, pl);
+                console.log(`[Workflow] Re-scan termine pour ${appIdsToRescan.length} jeu(x).`);
             }
             
             // Enfiler les cartes stale pour le worker de fond (stale-while-revalidate)

@@ -208,6 +208,17 @@ async function checkSCEDisabled(appid) {
 }
 
 /**
+ * Indique si la file d'attente du bot SCE est saturee:
+ * waitTime > 1 minute ET plus de 10 offres en attente.
+ * (Metas 'sceWaitTime' / 'scePendingOffers' peuplees par fetchSCEGlobalInfo)
+ */
+export function isSCEBusy() {
+    const waitTime = parseFloat(getMeta('sceWaitTime', '0')) || 0;
+    const pendingOffers = parseInt(getMeta('scePendingOffers', '0'), 10) || 0;
+    return (waitTime > 1) && (pendingOffers > 10);
+}
+
+/**
  * Recupere l inventaire SCE (stock) pour un appid
  */
 async function fetchSCEInventory(appid) {
@@ -273,6 +284,14 @@ export async function fetchSCEFresh(appid) {
 
     // Recupere les infos globales (credit, pending offers)
     await fetchSCEGlobalInfo();
+
+    // File d'attente SCE saturee (waitTime > 1 min et plus de 10 offres en
+    // attente): on ne scrape pas maintenant, l'appid sera retente au prochain
+    // sync (cycle de surveillance du daemon, toutes les 10 minutes)
+    if (isSCEBusy()) {
+        ES_log(`[fetchSCEFresh] File SCE saturee (waitTime > 1 min, pendingOffers > 10) - appid ${appid} differe au prochain sync.`);
+        return null;
+    }
 
     // Recupere le jeu existant
     const existingGame = getGame(appid);
