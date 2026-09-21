@@ -139,7 +139,7 @@ foreach ($games as $g) {
             $c['_depositable'] = false;
             $c['_noDepositReason'] = $botFull
                 ? 'bot plein'
-                : ($recent ? 'prix trop eleve' : 'pas de vente < 7j');
+                : ($recent ? 'prix trop eleve' : 'vente < 7j');
         }
         $allOwned[] = $c;
     }
