@@ -127,19 +127,33 @@ foreach ($games as $g) {
         if ((int)($c['qty'] ?? 0) <= 0) continue;
 
         $hashAppId = $c['hash'] ? explode('-', $c['hash'])[0] : null;
-        $recent = hasRecentSales($c);
-        // Utiliser le prix marche Steam en EUR (uniquement si ventes recentes et prix connu)
-        $marketPrice = (float)($c['steam_market_price_eur'] ?? 0);
+        // Donnees marche Steam: fraicheur < 24h, ventes 7j, dernier prix connu
+        $priceRaw = $c['steam_market_price_eur'] ?? null;
+        $marketPrice = ($priceRaw === null || $priceRaw === '') ? null : (float)$priceRaw;
+        $sales7d = (int)($c['steam_market_sales_7d'] ?? 0);
+        $fetchedAt = (int)($c['steam_market_fetched_at'] ?? 0);
+        $marketFresh = $fetchedAt > 0 && $fetchedAt >= ((time() * 1000) - 24 * 60 * 60 * 1000);
         $botFull = (int)($c['sce_stock'] ?? 0) >= 8;
 
-        if ($hashAppId === (string)$g['appid'] && $recent && $marketPrice < 0.09 && !$botFull) {
+        // Depot uniquement pour les cartes SANS vente dans les 7 derniers
+        // jours (marche mort) et dont le prix marche est verifie < 0,09 EUR:
+        // une carte vendue dans les 7 derniers jours se vend mieux au marche
+        // Steam qu au bot (credits), donc hors depot.
+        $hashOk = $hashAppId === (string)$g['appid'];
+        if ($hashOk && !$botFull && $marketFresh && $sales7d === 0 && $marketPrice !== null && $marketPrice < 0.09) {
             $c['_depositable'] = true;
             $toGive[] = $c;
         } else {
             $c['_depositable'] = false;
             $c['_noDepositReason'] = $botFull
                 ? 'bot plein'
-                : ($recent ? 'prix trop eleve' : 'vente < 7j');
+                : (!$marketFresh
+                    ? 'donnees marche obsoletes'
+                    : ($sales7d > 0
+                        ? 'vente < 7j'
+                        : ($marketPrice === null
+                            ? 'prix non verifie'
+                            : 'prix trop eleve')));
         }
         $allOwned[] = $c;
     }
