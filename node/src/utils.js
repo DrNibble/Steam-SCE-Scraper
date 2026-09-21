@@ -11,6 +11,14 @@ export const CONCURRENCY_LIMIT = parseInt(process.env.CONCURRENCY_LIMIT || '4', 
 export const INVENTORY_PAGE_DELAY = parseInt(process.env.INVENTORY_PAGE_DELAY || '800', 10);
 
 export const STEAM_PROFILE_PATH = process.env.STEAM_PROFILE_PATH || 'my';
+
+// AppIDs d'evenements Steam (Sales, Awards, etc.) - a definir dans .env, separes par des virgules
+export const EVENT_APP_IDS = new Set(
+    (process.env.EVENT_APP_IDS || '')
+        .split(',')
+        .map(id => id.trim())
+        .filter(Boolean)
+);
 export const SCE_COOKIE = process.env.SCE_COOKIE || '';
 export const TRADE_PARTNER = process.env.TRADE_PARTNER || '83905207';
 export const TRADE_TOKEN = process.env.TRADE_TOKEN || 'tEx7-bXd';
@@ -140,18 +148,6 @@ export function clean(str, fullNormalize = false) {
     }
     return cleaned;
 }
-
-/**
- * Liste des AppIDs d'evenements Steam (Sales, Awards, etc.)
- */
-const EVENT_APP_IDS = new Set([
-    '335590', '365960', '425280', '483980', '566020',
-    '639900', '762800', '876740', '991980', '1096040',
-    '1263330', '1343890', '1493030', '1658760', '1790600',
-    '1926100', '2243720', '2459330', '2640160', '2861690',
-    '3344600', '3558940', '866860', '1083560', '1442870', '1195670',
-    '1797760'
-]);
 
 const EVENT_PATTERN = /Sale 20\d{2}|Soldes d'été|Soldes d'hiver|Les Steam Awards|Holiday Sale/i;
 

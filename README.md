@@ -54,6 +54,7 @@ Editez le fichier `.env` et renseignez vos cookies de session :
   - DevTools > Application > Cookies > steamcardexchange.net
 - **STEAM_PROFILE_PATH** : Chemin du profil Steam (`my`, `profiles/<SteamID64>`, ou `id/<vanity>`)
 - **SCE_USD_TO_EUR** (optionnel) : Taux de change USD->EUR fixe pour la conversion des prix de la gamepage SCE (par defaut : taux BCE via frankfurter.app, mis en cache 24h, fallback 0.92)
+- **EVENT_APP_IDS** : AppIDs des evenements Steam (Sales, Awards, etc.), separes par des virgules (ex: `335590,866860,1797760`). Utilises par `isSteamEvent()` pour classer les badges d'evenements. A completer au fil des nouveaux evenements Steam.
 
 ### 3. Initialisation de la base
 
