@@ -49,11 +49,13 @@ async function main() {
 
         case '--badges':
         case 'badges':
-            // Force le scan complet meme si la BD n'est pas vide
+            // Force le scan complet de TOUTES les pages de badges (p=1..N):
+            //   Phase 1: fetchSteamData + fetchSCEFresh / fetchSCEInventory
+            //            (4 taches paralleles si waitTime SCE < 1 min)
+            //   Phase 2: fetchMarketPricesV2 (sequentiel) une fois tous les
+            //            badges a jour en DB
             {
-                const { getPageAppids } = await import('./steam.js');
-                const { analyzeBadgeStatus } = await import('./analyze.js');
-                const { isSteamEvent } = await import('./utils.js');
+                const { syncBadgesWorkflow } = await import('./sync.js');
 
                 // Authentification necessaire pour Steam
                 if (!getSteamCookie()) {
@@ -61,14 +63,7 @@ async function main() {
                     setSteamCookie(cookies);
                 }
 
-                console.log(`BD actuelle: ${countGames()} jeux.`);
-                const pageAppids = await getPageAppids(getSteamProfilePath());
-                const appids = pageAppids.filter(i => !isSteamEvent(i.appid)).map(i => i.appid);
-                console.log(`Scan force de ${appids.length} badges...`);
-                await processQueue(appids, getSteamProfilePath());
-                pageAppids.forEach(item => {
-                    if (!isSteamEvent(item.appid)) analyzeBadgeStatus(item.appid);
-                });
+                await syncBadgesWorkflow(getSteamProfilePath());
                 console.log('Termine.');
             }
             break;

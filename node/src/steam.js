@@ -13,27 +13,23 @@ const STEAM_AJAX_HEADERS = {
 };
 
 /**
- * Recupere les appids et noms de jeux depuis la page des badges
- * @param {string} profileLink - "my" ou SteamID64
- * @returns {Promise<Array>} Tableau d'objets {appid, gamename}
+ * Parse le HTML d'une page de badges et enregistre les appids en DB.
+ * @param {string} html - HTML d'une page /badges (une seule page)
+ * @returns {Array} Tableau d'objets {appid, gamename}
  */
-export async function getPageAppids(profileLink = null) {
-    const pl = profileLink || profilePath();
-    const url = `https://steamcommunity.com/${pl}/badges`;
-    const html = await httpGet(url, { cookies: steamCookie(), extraHeaders: { 'Referer': 'https://steamcommunity.com/' } });
-
+function parseBadgePage(html) {
     // Debug: detecter si on est sur une page de login
     const titleMatch = html.match(/<title>(.*?)<\/title>/i);
     const pageTitle = titleMatch ? titleMatch[1] : '(inconnu)';
-    ES_log(`[getPageAppids] Titre de la page: ${pageTitle}`);
+    ES_log(`[parseBadgePage] Titre de la page: ${pageTitle}`);
 
     if (html.includes('login') && html.includes('steamLogin')) {
-        console.error('[getPageAppids] Page de login detectee - les cookies Steam sont invalides.');
+        console.error('[parseBadgePage] Page de login detectee - les cookies Steam sont invalides.');
     }
 
     // Debug: verifier la presence de badge_row
     const badgeCount = (html.match(/badge_row/g) || []).length;
-    ES_log(`[getPageAppids] ${badgeCount} elements badge_row trouves dans le HTML.`);
+    ES_log(`[parseBadgePage] ${badgeCount} elements badge_row trouves dans le HTML.`);
 
     const $ = cheerio.load(html);
 
@@ -69,16 +65,115 @@ export async function getPageAppids(profileLink = null) {
 }
 
 /**
+ * Detecte le nombre total de pages de badges depuis le HTML d'une page /badges.
+ * - Sources: liens de pagination "?p=N" (.pagelink / .pagebtn)
+ * - Fallback: texte "Showing 1-150 of 246 badges"
+ * @param {string} html - HTML d'une page /badges
+ * @returns {number} Nombre de pages (1 si pas de pagination)
+ */
+function detectMaxBadgePage(html) {
+    let maxPage = 1;
+
+    // 1. Liens de pagination ?p=N
+    const pagingMatch = html.match(/<div class="profile_paging">[\s\S]*?<\/div>\s*<\/div>/);
+    const pagingHtml = pagingMatch ? pagingMatch[0] : html;
+    for (const m of pagingHtml.matchAll(/[?&]p=(\d+)/g)) {
+        maxPage = Math.max(maxPage, parseInt(m[1], 10));
+    }
+
+    // 2. Complement: "Showing 1-150 of 246 badges" -> nombre de pages total
+    //    (toujours pris en compte, meme si des liens ?p=N existent deja)
+    const showMatch = pagingHtml.match(/Showing\s+(\d+)\s*-\s*(\d+)\s+of\s+(\d+)\s+badges/i);
+    if (showMatch) {
+        const perPage = parseInt(showMatch[2], 10) - parseInt(showMatch[1], 10) + 1;
+        const total = parseInt(showMatch[3], 10);
+        if (perPage > 0 && total > 0) {
+            maxPage = Math.max(maxPage, Math.ceil(total / perPage));
+        }
+    }
+
+    return maxPage;
+}
+
+/**
+ * Recupere les appids et noms de jeux depuis UNE page des badges
+ * @param {string} profileLink - "my" ou SteamID64
+ * @param {number} page - numero de page (p=1 par defaut)
+ * @returns {Promise<Array>} Tableau d'objets {appid, gamename}
+ */
+export async function getPageAppids(profileLink = null, page = 1) {
+    const pl = profileLink || profilePath();
+    const url = `https://steamcommunity.com/${pl}/badges?p=${page}`;
+    const html = await httpGet(url, { cookies: steamCookie(), extraHeaders: { 'Referer': 'https://steamcommunity.com/' } });
+    return parseBadgePage(html);
+}
+
+/**
+ * Scanne TOUTES les pages de badges (p=1..N) et retourne les appids dedupliques.
+ * Le nombre de pages est detecte depuis la pagination de la page 1
+ * (liens ?p=N ou texte "Showing 1-150 of 246 badges").
+ * @param {string} profileLink - "my" ou SteamID64
+ * @returns {Promise<Array>} Tableau d'objets {appid, gamename}
+ */
+export async function getAllPagesAppids(profileLink = null) {
+    const pl = profileLink || profilePath();
+    const all = [];
+    const seen = new Set();
+
+    const fetchPage = (page) => httpGet(
+        `https://steamcommunity.com/${pl}/badges?p=${page}`,
+        { cookies: steamCookie(), extraHeaders: { 'Referer': 'https://steamcommunity.com/' } }
+    );
+
+    // Page 1: detecte la pagination
+    const firstHtml = await fetchPage(1);
+    const maxPage = detectMaxBadgePage(firstHtml);
+    ES_log(`[getAllPagesAppids] ${maxPage} page(s) de badges detectee(s).`);
+
+    let html = firstHtml;
+    for (let page = 1; page <= maxPage; page++) {
+        if (page > 1) {
+            html = await fetchPage(page);
+            await sleep(500); // Anti-rate-limit entre les pages
+        }
+
+        const results = parseBadgePage(html);
+        let newCount = 0;
+        for (const item of results) {
+            if (!seen.has(item.appid)) {
+                seen.add(item.appid);
+                all.push(item);
+                newCount++;
+            }
+        }
+        ES_log(`[getAllPagesAppids] Page ${page}/${maxPage}: ${results.length} badges dont ${newCount} nouveau(x).`);
+    }
+
+    return all;
+}
+
+/**
  * Recupere les donnees d'inventaire Steam de maniere paginee
  * @param {string} profileLink - "my" ou SteamID64
  * @returns {Promise<Object>} {rgInventory, rgDescriptions}
  */
 let inventoryCache = null;
+let inventoryFetchPromise = null;
 
 export async function fetchInventory(profileLink = null) {
-    const pl = profileLink || profilePath();
     if (inventoryCache) return inventoryCache;
 
+    // Une seule requete d'inventaire a la fois: les workers paralleles de
+    // processQueue partagent le meme resultat (evite N fetchs simultanes
+    // de l'inventaire quand fetchSCEInventory tourne en 4 taches)
+    if (inventoryFetchPromise) return inventoryFetchPromise;
+
+    inventoryFetchPromise = _fetchInventory(profileLink || profilePath())
+        .finally(() => { inventoryFetchPromise = null; });
+    return inventoryFetchPromise;
+}
+
+async function _fetchInventory(pl) {
     let allInventory = {};
     let allDescriptions = {};
     let nextStart = 0;

@@ -50,8 +50,9 @@ async function ensureSCECookie() {
 
 /**
  * Recupere le credit SCE et les offres en attente depuis la page profile
+ * (peuple la meta 'sceWaitTime' utilisee pour la parallelisation de fetchSCEInventory)
  */
-async function fetchSCEGlobalInfo() {
+export async function fetchSCEGlobalInfo() {
     if (creditFetched) return;
 
     // Verrou: evite les appels concurrents (workers multiples)

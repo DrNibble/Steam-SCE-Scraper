@@ -1,6 +1,6 @@
 import { sleep, isSteamEvent, ES_log, getSteamProfilePath, setSteamCookie, getSteamCookie, httpGet } from './utils.js';
-import { getPageAppids, fetchSteamData, syncSteamInventoryHistory } from './steam.js';
-import { fetchSCEFresh, resetCreditFlag } from './sce.js';
+import { getPageAppids, getAllPagesAppids, fetchSteamData, syncSteamInventoryHistory } from './steam.js';
+import { fetchSCEFresh, fetchSCEGlobalInfo, resetCreditFlag } from './sce.js';
 import { analyzeBadgeStatus } from './analyze.js';
 import { getAllBadgeAppids, getIncompleteBadgeAppids, getGame, purgeCache, getMeta, setMeta, isDBEmpty, countGames } from './db.js';
 import { getSteamCookies } from './auth.js';
@@ -10,15 +10,41 @@ import { startMarketWorker, enqueueGameCards, enqueueStaleCards, getQueueStats, 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 
+// Scan SCE: fetchSCEInventory s'execute en 4 taches paralleles si le waitTime
+// SCE (minutes) est < 1, sinon de facon sequentielle
+const SCE_PARALLEL_TASKS = 4;
+const SCE_PARALLEL_WAITTIME_MAX = 1;
+
 /**
- * Traite une liste d'appids sequentiellement (1 a la fois).
+ * Traite une liste d'appids (fetchSteamData + fetchSCEFresh par appid).
+ * fetchSCEInventory s'execute en 4 taches paralleles si le waitTime SCE
+ * est < 1 minute, sinon sequentiellement (1 tache a la fois).
+ * Retourne les appids dont le scan a reussi (a jour en DB).
  * @param {Array} appids - Tableau d'appids a traiter
  * @param {string} profileLink
+ * @param {Object} options - { market: false } pour differer fetchMarketPricesV2
+ *   (utile pour lancer les prix marche en phase 2, apres que TOUS les badges
+ *   soient a jour en DB via fetchSCEInventory)
  */
-export async function processQueue(appids, profileLink = null) {
+export async function processQueue(appids, profileLink = null, options = {}) {
+    const { market = true } = options;
     const pl = profileLink || getSteamProfilePath();
+    const dbReadyAppids = [];
 
-    for (const appid of appids) {
+    // Recupere le waitTime SCE AVANT la boucle (fetchSCEGlobalInfo est mis en
+    // cache via le flag creditFetched: aucune requete supplementaire lors du
+    // premier fetchSCEFresh, qui l'appelle aussi)
+    await fetchSCEGlobalInfo();
+    const waitTime = getSCEWaitTime();
+    const parallel = (waitTime < SCE_PARALLEL_WAITTIME_MAX) ? SCE_PARALLEL_TASKS : 1;
+    console.log(`[processQueue] waitTime SCE: ${waitTime} min -> ${parallel} tache(s) parallele(s) pour fetchSCEInventory sur ${appids.length} badges.`);
+
+    let index = 0;
+    async function worker() {
+    while (true) {
+        const i = index++;
+        if (i >= appids.length) return;
+        const appid = appids[i];
         try {
             if (isSteamEvent(appid)) continue;
 
@@ -30,12 +56,11 @@ export async function processQueue(appids, profileLink = null) {
             // 2. Scrap SCE (stock + worth + price + quick-trade)
             await fetchSCEFresh(appid);
 
-            // 3. Prix marche Steam Community (priceoverview -> EUR + ventes 7j)
-            //    Délai réduit à 500ms (au lieu de 3s) — le token bucket du worker gère le rate-limit global
-            await fetchMarketPricesV2(appid, 500);
-
-            // 4. Analyse
+            // 3. Analyse
             analyzeBadgeStatus(appid);
+
+            // Badge a jour en DB: eligible a la phase 2 (prix marche)
+            dbReadyAppids.push(appid);
 
             // Petit delai entre chaque appid pour eviter le rate-limit
             await sleep(500);
@@ -44,8 +69,99 @@ export async function processQueue(appids, profileLink = null) {
             console.error(`Erreur sur ${appid}:`, e);
         }
     }
+    }
+
+    await Promise.all(Array.from({ length: parallel }, () => worker()));
+
+    // Prix marche Steam: phase sequentielle, uniquement APRES que tous les
+    // badges soient a jour en DB via fetchSCEInventory. Les appids dont le
+    // scan a echoue sont exclus (dbReadyAppids).
+    if (market) {
+        await runMarketPhase(dbReadyAppids);
+    }
 
     ES_log('[processQueue] Scan termine.');
+    return dbReadyAppids;
+}
+
+/**
+ * Retourne le waitTime SCE (variable waitTime dans sce.js, stockee en meta
+ * 'sceWaitTime' par fetchSCEGlobalInfo, en minutes).
+ * @returns {number}
+ */
+export function getSCEWaitTime() {
+    return parseFloat(getMeta('sceWaitTime', '0')) || 0;
+}
+
+/**
+ * PHASE 2 du scan des badges: prix marche Steam (fetchMarketPricesV2) + analyse.
+ *
+ * Ne doit etre executee qu'une fois que TOUS les badges sont a jour en DB,
+ * c'est-a-dire apres l'execution de fetchSCEInventory (via fetchSCEFresh) qui
+ * peuple la DB (cartes possedees, manquantes, doublons, sce_stock,
+ * sce_quick_trade, sce_worth, sce_price...).
+ *
+ * Parallelisme: aucun — fetchMarketPricesV2 s'execute sequentiellement
+ * (c'est fetchSCEInventory, en phase 1, qui peut tourner en 4 taches
+ * paralleles si le waitTime SCE est < 1 minute).
+ *
+ * @param {Array} appids - Tableau d'appids a traiter
+ */
+export async function runMarketPhase(appids) {
+    console.log(`[runMarketPhase] ${appids.length} badges a traiter (sequentiel).`);
+
+    for (const appid of appids) {
+        try {
+            await fetchMarketPricesV2(appid, 500);
+            analyzeBadgeStatus(appid);
+        } catch (e) {
+            console.error(`[runMarketPhase] Erreur sur ${appid}:`, e);
+        }
+    }
+
+    console.log('[runMarketPhase] Phase prix marche terminee.');
+}
+
+/**
+ * Workflow complet du scan des badges (npm run sync:badges):
+ *   1. Scan de TOUTES les pages de badges (p=1..N)
+ *   2. Phase 1: fetchSteamData + fetchSCEFresh (fetchSCEInventory) pour chaque badge,
+ *      en 4 taches paralleles si le waitTime SCE est < 1 minute
+ *      -> peuple la DB (cartes possedees/manquantes/doublons, sce_stock,
+ *         sce_quick_trade, sce_worth, sce_price...)
+ *   3. Phase 2: fetchMarketPricesV2 pour TOUS les badges (sequentiel), uniquement
+ *      une fois que tous les badges sont a jour en DB, puis analyse de chaque badge
+ * @param {string} profileLink
+ */
+export async function syncBadgesWorkflow(profileLink = null) {
+    const pl = profileLink || getSteamProfilePath();
+    console.log('\n=== Workflow scan des badges (toutes les pages) ===\n');
+    console.log(`BD actuelle: ${countGames()} jeux.`);
+
+    // 1. Scan de toutes les pages de badges (p=1..N)
+    const pageAppids = await getAllPagesAppids(pl);
+    const appids = pageAppids.filter(i => !isSteamEvent(i.appid)).map(i => i.appid);
+    console.log(`${appids.length} badges a scanner (hors evenements Steam).`);
+
+    // 2. Phase 1: Steam (cartes + inventaire) + SCE via fetchSCEInventory
+    //    (4 taches paralleles si waitTime SCE < 1 min) - fetchMarketPricesV2
+    //    est differe (options.market = false) -> seuls les badges dont
+    //    fetchSteamData + fetchSCEFresh ont reussi (donc a jour en DB)
+    //    passent en phase 2
+    console.log('\n--- Phase 1: Steam + SCE (fetchSCEInventory) ---');
+    const dbReadyAppids = await processQueue(appids, pl, { market: false });
+
+    const failed = appids.filter(a => !dbReadyAppids.includes(a));
+    if (failed.length > 0) {
+        console.warn(`[syncBadgesWorkflow] ATTENTION: ${failed.length} badge(s) non a jour en DB: ${failed.join(', ')}`);
+        console.warn('[syncBadgesWorkflow] La phase prix marche ne sera executee que sur les badges a jour.');
+    }
+
+    // 3. Phase 2: prix marche Steam, uniquement pour les badges a jour en DB
+    console.log(`\n--- Phase 2: prix marche Steam (fetchMarketPricesV2) ---`);
+    await runMarketPhase(dbReadyAppids);
+
+    console.log(`\nTermine. BD: ${countGames()} jeux.`);
 }
 
 /**
@@ -119,9 +235,9 @@ export async function mainWorkflow(profileLink = null) {
         console.log('1. Synchronisation de l historique des trades...');
         await syncSteamInventoryHistory(pl);
 
-        // 2. Recuperer les appids de la page badges
-        console.log('2. Recuperation des appids depuis la page badges...');
-        const pageAppids = await getPageAppids(pl);
+        // 2. Recuperer les appids depuis TOUTES les pages de badges (p=1..N)
+        console.log('2. Recuperation des appids depuis toutes les pages de badges...');
+        const pageAppids = await getAllPagesAppids(pl);
         console.log(`   ${pageAppids.length} badges trouves.`);
 
         // 3. Lancer le scan complet via processQueue
