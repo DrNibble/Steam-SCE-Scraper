@@ -101,7 +101,7 @@ foreach ($games as $g) {
 
 // Tri : badges deja generes en fin de liste, puis peu de cartes restantes d abord
 usort($completableSceList, function($a, $b) {
-    // NULL (non verifie) est trie comme 0 : en tete avec les badges a generer
+    // NULL (non vérifié) est trie comme 0 : en tete avec les badges a generer
     if (($a['badgeCrafted'] ?? 0) !== ($b['badgeCrafted'] ?? 0)) {
         return ($a['badgeCrafted'] ?? 0) <=> ($b['badgeCrafted'] ?? 0);
     }
@@ -140,7 +140,7 @@ foreach ($games as $g) {
         // une carte vendue dans les 7 derniers jours se vend mieux au marche
         // Steam qu au bot (credits), donc hors depot.
         $hashOk = $hashAppId === (string)$g['appid'];
-        if ($hashOk && !$botFull && $marketFresh && $sales7d === 0 && $marketPrice !== null && $marketPrice < 0.09) {
+        if ($hashOk && !$botFull && $marketFresh && $marketPrice !== null && (($marketPrice > 0.09 && $sales7d === 0) || ($marketPrice < 0.09 && $sales7d > 0)) {
             $c['_depositable'] = true;
             $toGive[] = $c;
         } else {
@@ -148,12 +148,12 @@ foreach ($games as $g) {
             $c['_noDepositReason'] = $botFull
                 ? 'bot plein'
                 : (!$marketFresh
-                    ? 'donnees marche obsoletes'
+                    ? 'donneés marché obsolètes'
                     : ($sales7d > 0
-                        ? 'vente < 7j'
+                        ? 'vente récente'
                         : ($marketPrice === null
-                            ? 'prix non verifie'
-                            : 'prix trop eleve')));
+                            ? 'prix non vérifié'
+                            : 'prix trop élevé')));
         }
         $allOwned[] = $c;
     }
