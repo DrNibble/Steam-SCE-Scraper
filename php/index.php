@@ -117,16 +117,37 @@ foreach ($games as $g) {
     if ($isCompletable || $g['disabled'] || $g['has_expensive_card_json']) continue;
 
     $cards = getCardsForGame($db, $g['appid']);
-    $toGive = array_filter($cards, function($c) use ($g) {
+
+    // Toutes les cartes owned (par appid) sont affichees dans la colonne
+    // "Cartes (Inventaire)"; seules celles depositables partent dans l'envoi
+    // automatique (assetIds).
+    $toGive = [];
+    $allOwned = [];
+    foreach ($cards as $c) {
+        if ((int)($c['qty'] ?? 0) <= 0) continue;
+
         $hashAppId = $c['hash'] ? explode('-', $c['hash'])[0] : null;
+        $recent = hasRecentSales($c);
         // Utiliser le prix marche Steam en EUR (uniquement si ventes recentes et prix connu)
-        if (!hasRecentSales($c)) return false;
         $marketPrice = (float)($c['steam_market_price_eur'] ?? 0);
-        return $hashAppId === (string)$g['appid'] &&
-               (int)($c['qty'] ?? 0) > 0 &&
-               (int)($c['sce_stock'] ?? 0) < 8 &&
-               $marketPrice < 0.09;
-    });
+        $botFull = (int)($c['sce_stock'] ?? 0) >= 8;
+
+        if ($hashAppId === (string)$g['appid'] && $recent && $marketPrice < 0.09 && !$botFull) {
+            $c['_depositable'] = true;
+            $toGive[] = $c;
+        } else {
+            $c['_depositable'] = false;
+            $c['_noDepositReason'] = $botFull
+                ? 'bot plein'
+                : ($recent ? 'prix trop eleve' : 'pas de vente < 7j');
+        }
+        $allOwned[] = $c;
+    }
+    // Compteur de exemplaires possedes par carte (pour l affichage xN)
+    foreach ($allOwned as &$c) {
+        $c['_ownedQty'] = !empty($c['inv']) ? count($c['inv']) : (int)($c['qty'] ?? 0);
+    }
+    unset($c);
 
     $worth = 0;
     foreach ($toGive as $c) {
@@ -150,13 +171,19 @@ foreach ($games as $g) {
             'name' => $g['gamename'],
             'appid' => $g['appid'],
             'cards' => array_values($toGive),
+            'allCards' => $allOwned,
             'assetIds' => $assetIdsStr,
             'totalWorth' => $worth,
+            'badgeCrafted' => ($g['badge_crafted'] === null ? null : (int)$g['badge_crafted']),
         ];
     }
 }
 
+// Tri: badges deja presents sur id/Dr_Nibble en premier, puis worth croissant
 usort($depositList, function($a, $b) {
+    $ca = ($a['badgeCrafted'] === 1) ? 1 : 0;
+    $cb = ($b['badgeCrafted'] === 1) ? 1 : 0;
+    if ($ca !== $cb) return $cb <=> $ca; // badge deja present en premier
     return $a['totalWorth'] <=> $b['totalWorth'];
 });
 
@@ -357,7 +384,7 @@ $profileLink = STEAM_PROFILE_PATH;
                         ? 'background:#444;color:#888;cursor:not-allowed;border:1px solid #555;'
                         : 'background:#2e4b73;color:#fff;cursor:pointer;border:1px solid #446899;';
                     $btnDisabled = $isBotFull ? 'disabled' : '';
-                    $cardCount = count($g['cards']);
+                    $cardCount = $g['assetIds'] !== '' ? count(array_filter(explode(',', $g['assetIds']))) : 0;
                     $btnText = $isBotFull
                         ? 'Bot Surchargé (' . fmt($pendingOffers) . ')'
                         : 'Envoyer (' . fmt($cardCount) . ' carte' . ($cardCount > 1 ? 's' : '') . ')';
@@ -367,19 +394,40 @@ $profileLink = STEAM_PROFILE_PATH;
                         <a href="https://steamcommunity.com/<?= e($profileLink) ?>/gamecards/<?= e($g['appid']) ?>/" target="_blank" class="game-link">
                             <?= e($g['name']) ?>
                         </a>
+                        <?php if ($g['badgeCrafted'] === 1): ?>
+                            <br><small style="color:#ff9d00;">Badge deja genere</small>
+                        <?php endif; ?>
                     </td>
                     <td>
-                        <?php foreach ($g['cards'] as $c):
+                        <?php foreach ($g['allCards'] as $c):
                             $firstId = !empty($c['inv']) ? ($c['inv'][0]['id'] ?? '') : '';
                         ?>
-                            <small>
-                                <a href="https://steamcommunity.com/<?= e($profileLink) ?>/inventory/#753_6_<?= e($firstId) ?>" target="_blank" class="inv-link">
-                                    <?= e($c['name']) ?>
-                                </a>
-                                <?php if (hasRecentSales($c)): ?>
-                                    <span style="color:#8f98a0;"> (<?= fmtEur($c['steam_market_price_eur']) ?>)</span>
-                                <?php endif; ?>
-                            </small>
+                            <?php if (!empty($c['_depositable'])): ?>
+                                <small>
+                                    <a href="https://steamcommunity.com/<?= e($profileLink) ?>/inventory/#753_6_<?= e($firstId) ?>" target="_blank" class="inv-link">
+                                        <?= e($c['name']) ?>
+                                    </a>
+                                    <?php if ((int)($c['_ownedQty'] ?? 1) > 1): ?>
+                                        <b style="color:#fff;">(x<?= fmt($c['_ownedQty']) ?>)</b>
+                                    <?php endif; ?>
+                                    <?php if (hasRecentSales($c)): ?>
+                                        <span style="color:#8f98a0;"> (<?= fmtEur($c['steam_market_price_eur']) ?>)</span>
+                                    <?php endif; ?>
+                                </small>
+                            <?php else: ?>
+                                <small style="opacity:0.55;">
+                                    <a href="https://steamcommunity.com/<?= e($profileLink) ?>/inventory/#753_6_<?= e($firstId) ?>" target="_blank" class="inv-link">
+                                        <?= e($c['name']) ?>
+                                    </a>
+                                    <?php if ((int)($c['_ownedQty'] ?? 1) > 1): ?>
+                                        <b>(x<?= fmt($c['_ownedQty']) ?>)</b>
+                                    <?php endif; ?>
+                                    <?php if (hasRecentSales($c)): ?>
+                                        <span style="color:#8f98a0;"> (<?= fmtEur($c['steam_market_price_eur']) ?>)</span>
+                                    <?php endif; ?>
+                                    <span style="color:#8f98a0;">[hors depot: <?= e($c['_noDepositReason'] ?? '') ?>]</span>
+                                </small>
+                            <?php endif; ?>
                         <?php endforeach; ?>
                     </td>
                     <td>
