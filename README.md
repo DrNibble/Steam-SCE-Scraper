@@ -53,6 +53,7 @@ Editez le fichier `.env` et renseignez vos cookies de session :
 - **SCE_COOKIE** : Cookie de session SCE (format header complet, ex: `PHPSESSID=...; cookie_consent=1`)
   - DevTools > Application > Cookies > steamcardexchange.net
 - **STEAM_PROFILE_PATH** : Chemin du profil Steam (`my`, `profiles/<SteamID64>`, ou `id/<vanity>`)
+- **SCE_USD_TO_EUR** (optionnel) : Taux de change USD->EUR fixe pour la conversion des prix de la gamepage SCE (par defaut : taux BCE via frankfurter.app, mis en cache 24h, fallback 0.92)
 
 ### 3. Initialisation de la base
 
@@ -69,9 +70,9 @@ npm run sync
 ```
 
 Ce mode :
-1. Si la BD est vide : lance le scan complet (badges + cartes + SCE)
+1. Si la BD est vide : lance le scan complet (badges toutes pages + cartes + SCE, voir [Synchronisation en 2 phases](#synchronisation-des-badges-2-phases))
 2. Si la BD est remplie : passe directement en mode surveillance
-3. En mode surveillance : lance `syncSteamInventoryHistory` toutes les 10 minutes en boucle
+3. En mode surveillance : lance `syncSteamInventoryHistory` toutes les 10 minutes en boucle (les badges differes par le bot SCE sont retentes a chaque cycle)
 
 ### Scanner un appid specifique
 
@@ -108,6 +109,26 @@ npm run -- --status
 ```bash
 npm run -- --purge
 ```
+
+## Synchronisation des badges (2 phases)
+
+Le scan des badges (`npm run sync:badges`, scan initial du daemon) fonctionne en 2 phases. Les re-scans (`--scan-all`) retraitent les appids deja connus via le meme pipeline.
+
+### Phase 1 - Inventaire SCE (`fetchSCEInventory`)
+
+- Parcourt **toutes les pages de badges** du profil (`?p=1`, `?p=2`, ...) : le nombre de pages est detecte automatiquement (liens de pagination + "Showing X-Y of Z badges")
+- Pour chaque appid : `fetchSteamData` (cartes du set + inventaire) puis `fetchSCEFresh` (sce_stock, sce_price, sce_worth, sce_quick_trade, cartes possedees / manquantes / doublons)
+- Les prix USD des cartes sont extraits de la gamepage SCE (section "Trading Cards" uniquement) : stockes dans `sce_market_price_usd`, convertis en EUR et stockes dans `steam_market_price_eur`
+- S'execute en **4 taches paralleles** si le `waitTime` SCE est < 1 minute, sinon sequentiellement (1 tache)
+
+Si le bot SCE est sature (`waitTime` > 1 min ET `pendingOffers` > 10), `fetchSCEFresh` retourne null : le badge est differe (meta `sceDeferredAppids`) et retente au prochain cycle de 10 minutes du daemon.
+
+### Phase 2 - Prix marche (`fetchMarketPricesV2`)
+
+Executee **apres** la phase 1, uniquement sur les appids mis a jour avec succes en DB (`dbReadyAppids`) - les appids deferes par le bot SCE n'y passent qu'apres un cycle de retry reussi -, sequentiellement (appid par appid) :
+
+1. `fetchMarketPricesV2` (market.js) affine `steam_market_price_eur` avec le prix reel du marche (derniere vente < 7j, sinon buy order) - la valeur EUR posee par la phase 1 est preservee si le marche n'a pas de prix
+2. `analyzeBadgeStatus` recalcule les indicateurs de completion
 
 ## Worker de marché temps réel
 
@@ -188,15 +209,32 @@ php -S localhost:8080
 
 Puis ouvrez http://localhost:8080 dans votre navigateur.
 
+### Sections du rapport
+
+- **Cartes de Valeur** : cartes possedees de plus de 0,14 EUR au marche
+- **Completables via SCE** : badges completables avec le credit disponible
+- **A deposer au Bot** : cartes a envoyer au bot SCE contre des credits
+- **Badges Trade-In Desactive** : jeux dont le trade-in SCE est coupe (repliable)
+
+### Logique de depot ("A deposer au Bot")
+
+Une carte est deposable au bot uniquement si :
+
+- **aucune vente** dans les 7 derniers jours (une carte qui se vend encore vaut plus au marche Steam qu'en credits bot)
+- prix marche verifie < 0,09 EUR, avec donnees fraiches (< 24h)
+- stock du bot < 8
+
+Les jeux dont le badge est deja genere sur id/Dr_Nibble (`badge_crafted`) apparaissent en premier. La colonne "Cartes (Inventaire)" affiche toutes les cartes possedees du jeu : les non-deposables en grise avec la raison (`vente < 7j`, `prix trop eleve`, `donnees marche obsoletes`, `prix non verifie`, `bot plein`). Le bouton d'envoi automatique ne transmet que les assetIds des cartes deposables.
+
 ## Base de donnees SQLite
 
 La base `data/es_cache.sqlite` contient 5 tables :
 
 | Table | Description |
 |-------|-------------|
-| `meta` | Cles-valeurs globales (scecredit, scePendingOffers, sceWaitTime, lasttrade) |
-| `games` | Un jeu par appid (gamename, disabled, fetched_at, set_cards, indicateurs de completion) |
-| `cards` | Cartes individuelles par jeu (nom, hash, qty, inventaire, stock SCE, prix marché: vente, buy order, volume 7j) |
+| `meta` | Cles-valeurs globales (scecredit, scePendingOffers, sceWaitTime, lasttrade, sceDeferredAppids, usdToEur, usdToEurFetchedAt) |
+| `games` | Un jeu par appid (gamename, disabled, fetched_at, set_cards, badge_crafted, indicateurs de completion) |
+| `cards` | Cartes individuelles par jeu (nom, hash, qty, inventaire, stock SCE, prix gamepage SCE USD, prix marché: vente, buy order, volume 7j) |
 | `badge_appids` | AppIDs decouverts sur la page badges (cache de decouverte) |
 | `market_queue` | File d'attente du worker de marché (appid, hash, priorité, statut, timestamps) |
 
@@ -210,14 +248,15 @@ Pour chaque carte, le worker récupère 3 endpoints et stocke :
 | `steam_market_sell_qty` | orderbook | Quantité au prix de vente le plus bas |
 | `steam_market_buy_order_eur` | orderbook | Demande d'achat la plus haute (EUR, convertie depuis USD) |
 | `steam_market_sales_7d` | pricehistory | Volume de vente cumulé sur 7 jours |
-| `steam_market_price_eur` | résolu | Dernier prix de vente si < 7j, sinon buy order |
+| `steam_market_price_eur` | résolu | Dernier prix de vente si < 7j, sinon buy order. Peuple initialement par la conversion EUR du prix gamepage SCE (phase 1), puis affine par le marche |
+| `sce_market_price_usd` | gamepage SCE | Prix USD de la carte sur la gamepage SCE (section "Trading Cards") |
 
-Conversion EUR : le buy order de l'orderbook est en USD. Le taux de change effectif est calculé à partir du ratio `prix_vente_EUR / prix_vente_USD` (priceoverview / orderbook). Fallback à 0.92 si indisponible.
+Conversions EUR : le buy order de l'orderbook est en USD - le taux effectif est calcule a partir du ratio `prix_vente_EUR / prix_vente_USD` (priceoverview / orderbook), fallback a 0.92. Les prix de la gamepage SCE sont convertis avec le taux BCE (frankfurter.app, cache 24h, surcharge `SCE_USD_TO_EUR`, fallback 0.92).
 
 ## Workflow
 
-1. Le scraper Node.js recupere les donnees Steam (badges, inventaire, historique) et SCE (prix, stock)
-2. Les donnees sont stockees dans SQLite
+1. Le scraper Node.js recupere les donnees Steam (badges toutes pages, inventaire, historique) et SCE (prix, stock, prix gamepage USD)
+2. Les donnees sont stockees dans SQLite (phase 1 : inventaire SCE, phase 2 : prix marche)
 3. Le worker de marché récupère les prix en quasi temps réel (token bucket, file prioritaire)
 4. Le front-end PHP lit SQLite et genere le rapport HTML (cartes cheres, completables, depot)
 
@@ -229,7 +268,7 @@ Conversion EUR : le buy order de l'orderbook est en USD. Le taux de change effec
 | `npm run login` | Authentification Steam (mot de passe ou QR code) |
 | `npm run login:qr` | Authentification Steam via QR code |
 | `npm run login:password` | Authentification Steam via mot de passe |
-| `npm run sync:badges` | Force le scan complet de tous les badges |
+| `npm run sync:badges` | Force le scan complet de tous les badges (toutes les pages, 2 phases) |
 | `npm run sync:gamecards <appid>` | Scanne un appid specifique |
 | `npm run sync:history` | Synchronise l'historique des trades |
 | `npm run init-db` | Initialise la base SQLite |
