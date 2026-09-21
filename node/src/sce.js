@@ -181,7 +181,7 @@ async function _fetchSCEGlobalInfoInner() {
         setMeta('sceWaitTime', String(waitTime));
 
         creditFetched = true;
-        ES_log(`[fetchSCEGlobalInfo] Credit: ${sceCredit} | File: ${pendingOffers} offres.`);
+        ES_log(`[fetchSCEGlobalInfo] Credit: ${sceCredit} | Queue: ${pendingOffers} offres.`);
     } catch (e) {
         console.warn('[fetchSCEGlobalInfo] Erreur:', e);
     }
@@ -208,7 +208,7 @@ async function checkSCEDisabled(appid) {
 }
 
 /**
- * Recupere l inventaire SCE (credits, stock) pour un appid
+ * Recupere l inventaire SCE (stock) pour un appid
  */
 async function fetchSCEInventory(appid) {
     const html = await httpGet(`https://www.steamcardexchange.net/index.php?inventorygame-appid-${appid}`, { cookies: getSCECookie() });
