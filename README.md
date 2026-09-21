@@ -214,12 +214,6 @@ Pour chaque carte, le worker récupère 3 endpoints et stocke :
 
 Conversion EUR : le buy order de l'orderbook est en USD. Le taux de change effectif est calculé à partir du ratio `prix_vente_EUR / prix_vente_USD` (priceoverview / orderbook). Fallback à 0.92 si indisponible.
 
-## Corrections de bugs du script original
-
-- `qty: (card.owned || 0, 10)` toujours egal a 10 -> corrige en `qty: card.owned || 0`
-- `let inventoryCache = null` dans `syncSteamInventoryHistory` masquait la variable externe -> supprime
-- `isCompletableviaSCEnobudget` reference mais inexistant -> utilise `isCompletableviaSCEwobudget`
-
 ## Workflow
 
 1. Le scraper Node.js recupere les donnees Steam (badges, inventaire, historique) et SCE (prix, stock)
