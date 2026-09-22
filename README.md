@@ -72,8 +72,10 @@ npm run sync
 
 Ce mode :
 1. Si la BD est vide : lance le scan complet (badges toutes pages + cartes + SCE, voir [Synchronisation en 2 phases](#synchronisation-des-badges-2-phases))
-2. Si la BD est remplie : passe directement en mode surveillance
-3. En mode surveillance : lance `syncSteamInventoryHistory` toutes les 10 minutes en boucle (les badges differes par le bot SCE sont retentes a chaque cycle)
+2. Si la BD est remplie : passe directement en mode surveillance (un scan complet part dès le premier cycle)
+3. En mode surveillance :
+   - `syncSteamInventoryHistory` toutes les **5 minutes** (les badges differes par le bot SCE sont retentes a chaque cycle, avec re-scan cible des jeux touches par des trades)
+   - scan complet des badges (toutes les pages, phases 1 + 2, comme `npm run sync:badges`) toutes les **15 minutes** - le re-scan cible est skippe sur ces cycles car le scan complet couvre deja ces appids
 
 ### Scanner un appid specifique
 
@@ -122,35 +124,45 @@ Le scan des badges (`npm run sync:badges`, scan initial du daemon) fonctionne en
 - Les prix USD des cartes sont extraits de la gamepage SCE (section "Trading Cards" uniquement) : stockes dans `sce_market_price_usd`, convertis en EUR et stockes dans `steam_market_price_eur`
 - S'execute en **4 taches paralleles** si le `waitTime` SCE est < 1 minute, sinon sequentiellement (1 tache)
 
-Si le bot SCE est sature (`waitTime` > 1 min ET `pendingOffers` > 10), `fetchSCEFresh` retourne null : le badge est differe (meta `sceDeferredAppids`) et retente au prochain cycle de 10 minutes du daemon.
+Si le bot SCE est sature (`waitTime` > 1 min ET `pendingOffers` > 10), `fetchSCEFresh` retourne null : le badge est differe (meta `sceDeferredAppids`) et retente au prochain cycle de 5 minutes du daemon.
 
 ### Phase 2 - Prix marche (`fetchMarketPricesV2`)
 
 Executee **apres** la phase 1, uniquement sur les appids mis a jour avec succes en DB (`dbReadyAppids`) - les appids deferes par le bot SCE n'y passent qu'apres un cycle de retry reussi -, sequentiellement (appid par appid) :
 
-1. `fetchMarketPricesV2` (market.js) affine `steam_market_price_eur` avec le prix reel du marche (derniere vente < 7j, sinon buy order) - la valeur EUR posee par la phase 1 est preservee si le marche n'a pas de prix
+1. `fetchMarketPricesV2` (market.js) affine `steam_market_price_eur` avec le prix reel du marche (derniere vente < 7j, sinon buy order) - la valeur EUR posee par la phase 1 est preservee si le marche n'a pas de prix. **Limite 24h** : une carte dont le prix a ete fetche il y a moins de 24h (`cards.steam_market_fetched_at`) est ignoree, aucune requete n'est faite (voir [Limite 24h des prix marche](#limite-24h-des-prix-marche))
 2. `analyzeBadgeStatus` recalcule les indicateurs de completion
+
+## Limite 24h des prix marche
+
+Un prix marche n'est **jamais re-fetché avant 24h** (`MARKET_PRICE_REFRESH_MS` dans market.js), quel que soit le chemin :
+
+- `fetchMarketPricesV2` (phase 2 des scans) ignore les cartes fraiches (< 24h)
+- le worker marketQueue passe `STALE_MS` a 24h et sort les cartes fraiches de la file **avant** meme de consommer un token du rate-limiter
+- une carte fraiche enfilee (trade recent, front PHP, `--market refresh`) est marquee done sans aucune requete reseau
+
+Si vous voulez changer cette fenetre (12h, 48h...), modifiez uniquement la constante `MARKET_PRICE_REFRESH_MS` exportee par `market.js`.
 
 ## Worker de marché temps réel
 
-Le projet intègre un worker de marché qui récupère les prix Steam Community en quasi temps réel, sans le délai fixe de 3s par carte. Il utilise un **token bucket adaptatif** (~100 req/min) avec une **file d'attente prioritaire** et le pattern **stale-while-revalidate**.
+Le projet intègre un worker de marché qui récupère les prix Steam Community, sans le délai fixe de 3s par carte. Il utilise un **token bucket adaptatif** (~100 req/min) avec une **file d'attente prioritaire** et le pattern **stale-while-revalidate**. Dans la limite d'un fetch par carte et par 24h (voir [Limite 24h des prix marche](#limite-24h-des-prix-marche)).
 
 ### Architecture
 
 - **Token bucket** : 1 requête toutes les 600ms (au lieu de 3s fixe), bursts de 5 requêtes autorisés
 - **Backoff adaptatif** : cooldown 30s sur 429 (rate limit Steam), puis récupération progressive
 - **File prioritaire** : les cartes visibles/trade récent passent en premier
-- **Stale-while-revalidate** : le front lit le cache instantanément, le worker refresh en arrière-plan
+- **Stale-while-revalidate** : le front lit le cache instantanément, le worker refresh en arrière-plan (au plus tôt 24h après le dernier fetch, voir [Limite 24h](#limite-24h-des-prix-marche))
 - **Optimisation** : 1 req par carte en moyenne (pricehistory suffit si vente récente, orderbook sinon)
 
 ### Niveaux de priorité
 
 | Priorité | Quand | Délai typique |
 |----------|-------|---------------|
-| 100 | Carte affichée dans le front PHP | 1-2s |
-| 80 | Trade récent détecté (`syncSteamInventoryHistory`) | 2-5s |
-| 60 | Badge complétable (cartes manquantes) | 5-10s |
-| 30 | Prix daté (> 30 min) | 10-30s |
+| 100 | Carte affichée dans le front PHP | 1-2s (si > 24h) |
+| 80 | Trade récent détecté (`syncSteamInventoryHistory`) | 2-5s (si > 24h) |
+| 60 | Badge complétable (cartes manquantes) | 5-10s (si > 24h) |
+| 30 | Prix daté (> 24h) | 10-30s |
 | 10 | Reste du cache | fond |
 
 ### Démarrer le worker standalone
@@ -167,7 +179,7 @@ Le worker enfile toutes les cartes connues au démarrage (priorité basse) et le
 npm run -- --market price 616580-Servie
 ```
 
-Retourne le prix en cache immédiatement. Si le prix est stale (> 30 min), la carte est enfilée en priorité max pour refresh.
+Retourne le prix en cache immédiatement. Si le prix est stale (> 24h), la carte est enfilée en priorité max pour refresh. Une carte fraîche (< 24h) n'est jamais re-fetchée (limite globale).
 
 ### Forcer le refresh d'une carte
 
@@ -175,7 +187,7 @@ Retourne le prix en cache immédiatement. Si le prix est stale (> 30 min), la ca
 npm run -- --market refresh 616580-Servie
 ```
 
-Enfile la carte en priorité max (100). Le worker la traitera sous peu (si un worker tourne).
+Enfile la carte en priorité max (100). Le worker la traitera sous peu (si un worker tourne) - sauf si son prix a été fetché il y a moins de 24h : la limite 24h est globale et ce forcage ne la contourne pas.
 
 ### Enfiler les cartes stale
 
@@ -183,7 +195,7 @@ Enfile la carte en priorité max (100). Le worker la traitera sous peu (si un wo
 npm run -- --market enqueue
 ```
 
-Parcourt la base et enfile toutes les cartes dont le prix date de plus de 30 minutes.
+Parcourt la base et enfile toutes les cartes dont le prix date de plus de 24 heures (les cartes fraîches déjà en file sont sorties sans requête).
 
 ### Stats de la queue
 
@@ -194,10 +206,11 @@ npm run -- --market stats
 ### Intégration avec le mode daemon
 
 Le mode `npm run sync` démarre automatiquement le worker de marché en arrière-plan. Dans la boucle de surveillance :
-1. `syncSteamInventoryHistory` détecte les trades récents toutes les 10 min
-2. Les jeux avec trades sont re-scannés (`processQueue` avec délai réduit à 500ms)
-3. Les cartes stale sont enfilées pour le worker de fond
-4. Le worker refresh les prix en continu avec le token bucket
+1. `syncSteamInventoryHistory` détecte les trades récents toutes les 5 min
+2. Les jeux avec trades sont re-scannés (`processQueue` avec délai réduit à 500ms) hors cycles de scan complet
+3. Un scan complet des badges (toutes les pages, 2 phases) tourne toutes les 15 min
+4. Les cartes stale (> 24h) sont enfilées pour le worker de fond
+5. Le worker refresh les prix en continu avec le token bucket, dans la limite d'un fetch par 24h et par carte
 
 ### Lancer le front-end PHP
 
@@ -258,14 +271,14 @@ Conversions EUR : le buy order de l'orderbook est en USD - le taux effectif est 
 
 1. Le scraper Node.js recupere les donnees Steam (badges toutes pages, inventaire, historique) et SCE (prix, stock, prix gamepage USD)
 2. Les donnees sont stockees dans SQLite (phase 1 : inventaire SCE, phase 2 : prix marche)
-3. Le worker de marché récupère les prix en quasi temps réel (token bucket, file prioritaire)
+3. Le worker de marché récupère les prix (token bucket, file prioritaire, au plus 1 fetch par carte et par 24h)
 4. Le front-end PHP lit SQLite et genere le rapport HTML (cartes cheres, completables, depot)
 
 ## Commandes disponibles
 
 | Commande | Description |
 |----------|-------------|
-| `npm run sync` | Mode daemon (scan + surveillance + worker marché) |
+| `npm run sync` | Mode daemon (tradehistory 5 min, scan complet 15 min, worker marché) |
 | `npm run login` | Authentification Steam (mot de passe ou QR code) |
 | `npm run login:qr` | Authentification Steam via QR code |
 | `npm run login:password` | Authentification Steam via mot de passe |
