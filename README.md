@@ -119,8 +119,8 @@ Le scan des badges (`npm run sync:badges`, scan initial du daemon) fonctionne en
 
 ### Phase 1 - Inventaire SCE (`fetchSCEInventory`)
 
-- Parcourt **toutes les pages de badges** du profil (`?p=1`, `?p=2`, ...) : le nombre de pages est detecte automatiquement (liens de pagination + "Showing X-Y of Z badges")
-- Pour chaque appid : `fetchSteamData` (cartes du set + inventaire) puis `fetchSCEFresh` (sce_stock, sce_price, sce_worth, sce_quick_trade, cartes possedees / manquantes / doublons)
+- Parcourt **toutes les pages de badges** du profil (`?p=1`, `?p=2`, ...) : le nombre de pages est detecte automatiquement (liens de pagination + "Showing X-Y of Z badges"). Le resultat est mis en cache 1h (voir [Caches anti rate-limit](#caches-anti-rate-limit-steam))
+- Pour chaque appid : `fetchSteamData` (cartes du set + inventaire, reutilise la DB si fetchee il y a moins de 30 min) puis `fetchSCEFresh` (sce_stock, sce_price, sce_worth, sce_quick_trade, cartes possedees / manquantes / doublons)
 - Les prix USD des cartes sont extraits de la gamepage SCE (section "Trading Cards" uniquement) : stockes dans `sce_market_price_usd`, convertis en EUR et stockes dans `steam_market_price_eur`
 - S'execute en **4 taches paralleles** si le `waitTime` SCE est < 1 minute, sinon sequentiellement (1 tache)
 
@@ -142,6 +142,23 @@ Un prix marche n'est **jamais re-fetché avant 24h** (`MARKET_PRICE_REFRESH_MS` 
 - une carte fraiche enfilee (trade recent, front PHP, `--market refresh`) est marquee done sans aucune requete reseau
 
 Si vous voulez changer cette fenetre (12h, 48h...), modifiez uniquement la constante `MARKET_PRICE_REFRESH_MS` exportee par `market.js`.
+
+## Caches anti rate-limit (Steam)
+
+Tous les appels vers steamcommunity.com sont mis en cache (constantes `STEAM_CACHE_TTL` dans steam.js) pour rester sous le rate limit (~100 req/min) :
+
+| Endpoint | Cache | TTL |
+|----------|-------|-----|
+| Pages `/badges?p=N` (liste d appids, `getAllPagesAppids`) | memoire, par profil | 1h |
+| `ajaxgetbadgeinfo` (cartes du set, `fetchSteamData`) | DB (`games.fetched_at`) | 30 min |
+| Page `gamecards` (`fetchBadgeCrafted`, statut badge crafte) | DB (`badge_crafted` + `badge_crafted_fetched_at`) | `= 1` : jamais re-checke ; `= 0` : 30 min ; NULL : check systematique |
+| Inventaire `753_6` (`fetchInventory`) | memoire, partage entre taches du cycle (singleflight) | 5 min |
+| Prix marche (priceoverview, orderbook, pricehistory) | DB (`cards.steam_market_fetched_at`) | 24h (voir [Limite 24h](#limite-24h-des-prix-marche)) |
+| `inventoryhistory` (`syncSteamInventoryHistory`) | aucun | - |
+
+**Invalidation** : des qu un nouveau trade est detecte (`syncSteamInventoryHistory`), le cache inventaire est invalide et les jeux concernes sont re-scannes en force (`forceSteam: true`), donc la fraicheur des donnees apres un trade est preservee.
+
+**Bypass** : les commandes manuelles contournent ces TTL - `npm run sync:badges`, `npm run sync:gamecards <appid>`, `npm run -- --scan-all` et `npm run -- --refetch-cards` passent `forceSteam: true`. Le scan complet automatique du daemon (15 min) utilise les TTL : en pratique les donnees Steam sont re-fetchees toutes les 30 min et les pages de badges toutes les heures.
 
 ## Worker de marché temps réel
 

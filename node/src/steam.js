@@ -95,6 +95,34 @@ function detectMaxBadgePage(html) {
     return maxPage;
 }
 
+// ═════════════════════════════════════════════════════════════
+// Caches anti rate-limit (endpoints Steam)
+// ═════════════════════════════════════════════════════════════
+/**
+ * TTL des caches Steam. Objectif : minimiser les requetes vers
+ * steamcommunity.com (rate limit ~100/min) sans casser la fraicheur :
+ * - un trade detecte (syncSteamInventoryHistory) invalide le cache
+ *   inventaire et force un re-scan cible des jeux concernes
+ * - les commandes manuelles (sync:badges, sync:gamecards, --scan-all,
+ *   --refetch-cards) bypassent ces TTL via l option force
+ * - les prix marche ont leur propre limite 24h (MARKET_PRICE_REFRESH_MS,
+ *   voir market.js)
+ */
+export const STEAM_CACHE_TTL = {
+    // Pages /badges?p=N (liste d appids + gamenames) : stable, peu de nouveaux jeux
+    BADGE_PAGES_MS: 60 * 60 * 1000,        // 1 heure
+    // ajaxgetbadgeinfo (cartes du set + qty possedees) : rafraichi par les
+    // scans complets et les rescans forces apres trade
+    STEAM_DATA_MS: 30 * 60 * 1000,         // 30 minutes
+    // Re-check du statut badge_crafted = 0 (badge pas encore genere).
+    // Un badge_crafted = 1 n est JAMAIS re-checke (un badge crafte
+    // ne disparait pas).
+    BADGE_CRAFTED_FALSE_MS: 30 * 60 * 1000, // 30 minutes
+    // Inventaire 753_6 (fillInventoryData) : partage par toutes les taches
+    // d un meme cycle + invalide des qu un nouveau trade est detecte
+    INVENTORY_MS: 5 * 60 * 1000,           // 5 minutes
+};
+
 /**
  * Recupere les appids et noms de jeux depuis UNE page des badges
  * @param {string} profileLink - "my" ou SteamID64
@@ -112,11 +140,29 @@ export async function getPageAppids(profileLink = null, page = 1) {
  * Scanne TOUTES les pages de badges (p=1..N) et retourne les appids dedupliques.
  * Le nombre de pages est detecte depuis la pagination de la page 1
  * (liens ?p=N ou texte "Showing 1-150 of 246 badges").
+ * Resultat mis en cache 1h (STEAM_CACHE_TTL.BADGE_PAGES_MS) : le scan
+ * complet daemon (15 min) reutilise la liste au lieu de re-fetcher toutes
+ * les pages de badges a chaque cycle.
  * @param {string} profileLink - "my" ou SteamID64
+ * @param {Object} options - { force: true } pour bypasser le cache
  * @returns {Promise<Array>} Tableau d'objets {appid, gamename}
  */
-export async function getAllPagesAppids(profileLink = null) {
+let badgePagesCache = null; // { profileLink, appids, fetchedAt }
+
+export function invalidateBadgePagesCache() {
+    badgePagesCache = null;
+}
+
+export async function getAllPagesAppids(profileLink = null, options = {}) {
     const pl = profileLink || profilePath();
+    const { force = false } = options;
+
+    if (!force && badgePagesCache && badgePagesCache.profileLink === pl
+        && Date.now() - badgePagesCache.fetchedAt < STEAM_CACHE_TTL.BADGE_PAGES_MS) {
+        ES_log(`[getAllPagesAppids] Cache liste appids (< ${STEAM_CACHE_TTL.BADGE_PAGES_MS / 60000} min), ${badgePagesCache.appids.length} badges reutilises.`);
+        return badgePagesCache.appids;
+    }
+
     const all = [];
     const seen = new Set();
 
@@ -149,6 +195,7 @@ export async function getAllPagesAppids(profileLink = null) {
         ES_log(`[getAllPagesAppids] Page ${page}/${maxPage}: ${results.length} badges dont ${newCount} nouveau(x).`);
     }
 
+    badgePagesCache = { profileLink: pl, appids: all, fetchedAt: Date.now() };
     return all;
 }
 
@@ -157,18 +204,32 @@ export async function getAllPagesAppids(profileLink = null) {
  * @param {string} profileLink - "my" ou SteamID64
  * @returns {Promise<Object>} {rgInventory, rgDescriptions}
  */
-let inventoryCache = null;
+let inventoryCache = null; // { profileLink, data: {rgInventory, rgDescriptions}, fetchedAt }
 let inventoryFetchPromise = null;
 
+/** Invalide le cache inventaire (nouveau trade ou purge manuelle). */
+export function invalidateInventoryCache() {
+    ES_log('[fetchInventory] Cache inventaire invalide.');
+    inventoryCache = null;
+}
+
 export async function fetchInventory(profileLink = null) {
-    if (inventoryCache) return inventoryCache;
+    const pl = profileLink || profilePath();
+
+    // Cache TTL: l inventaire est partage par toutes les taches du cycle.
+    // Un trade detecte par syncSteamInventoryHistory invalide ce cache.
+    if (inventoryCache && inventoryCache.profileLink === pl
+        && Date.now() - inventoryCache.fetchedAt < STEAM_CACHE_TTL.INVENTORY_MS) {
+        return inventoryCache.data;
+    }
+    inventoryCache = null; // expire
 
     // Une seule requete d'inventaire a la fois: les workers paralleles de
     // processQueue partagent le meme resultat (evite N fetchs simultanes
     // de l'inventaire quand fetchSCEInventory tourne en 4 taches)
     if (inventoryFetchPromise) return inventoryFetchPromise;
 
-    inventoryFetchPromise = _fetchInventory(profileLink || profilePath())
+    inventoryFetchPromise = _fetchInventory(pl)
         .finally(() => { inventoryFetchPromise = null; });
     return inventoryFetchPromise;
 }
@@ -201,8 +262,8 @@ async function _fetchInventory(pl) {
     }
 
     if (Object.keys(allInventory).length > 0) {
-        inventoryCache = { rgInventory: allInventory, rgDescriptions: allDescriptions };
-        return inventoryCache;
+        inventoryCache = { profileLink: pl, data: { rgInventory: allInventory, rgDescriptions: allDescriptions }, fetchedAt: Date.now() };
+        return inventoryCache.data;
     }
 
     console.error('[Inventory] Impossible de charger l inventaire.');
@@ -276,13 +337,39 @@ const BADGE_PROFILE_PATH = process.env.BADGE_PROFILE_PATH || 'id/Dr_Nibble';
  * - Badge crafte : la page contient "badge_info_unlocked" (badge obtenu + date de deblocage)
  *   et/ou "badge_icon" (image du badge crafte, ex: "Level 2, 200 XP")
  * - Badge non crafte : la page contient "badge_empty_circle" (ex: "Niveau 0 - X cartes collectees sur Y")
+ *
+ * Cache anti rate-limit (DB, colonnes badge_crafted / badge_crafted_fetched_at) :
+ * - badge_crafted = 1 : JAMAIS re-checke (un badge crafte ne disparait pas)
+ * - badge_crafted = 0 verifie il y a moins de BADGE_CRAFTED_FALSE_MS : skip
+ * - NULL (jamais verifie) ou resultat indetermine : pas de cache
+ * - { force: true } bypass ces regles (commandes manuelles)
+ * Le resultat (true/false) est ecrit en DB par setGameBadgeCrafted.
+ *
  * @param {string} appid
  * @param {string|null} profileLink - optionnel: autre profil a verifier (defaut: compte principal)
+ * @param {Object} options - { force: true } pour bypasser le cache
  * @returns {Promise<boolean|null>} true = deja genere, false = pas encore, null = indetermine (erreur)
  */
-export async function fetchBadgeCrafted(appid, profileLink = null) {
+export async function fetchBadgeCrafted(appid, profileLink = null, options = {}) {
     const pl = profileLink || BADGE_PROFILE_PATH;
     if (isSteamEvent(appid)) return null;
+    const { force = false } = options;
+
+    // Cache DB : evite de re-fetch la page gamecards a chaque scan complet
+    const existing = getGame(appid);
+    const crafted = existing?.badge_crafted ?? null;
+    if (!force) {
+        if (crafted === 1) {
+            ES_log(`[fetchBadgeCrafted] ${appid}: badge crafte (cache DB), pas de re-check.`);
+            return true;
+        }
+        const checkedAt = Number(existing?.badge_crafted_fetched_at ?? 0);
+        if (crafted === 0 && checkedAt > 0
+            && Date.now() - checkedAt < STEAM_CACHE_TTL.BADGE_CRAFTED_FALSE_MS) {
+            ES_log(`[fetchBadgeCrafted] ${appid}: badge non crafte verifie recemment, pas de re-check.`);
+            return false;
+        }
+    }
 
     const url = `https://steamcommunity.com/${pl}/gamecards/${appid}`;
     try {
@@ -295,10 +382,14 @@ export async function fetchBadgeCrafted(appid, profileLink = null) {
         // Badge crafte : la page montre le badge obtenu (image + date de deblocage).
         // On teste ces marqueurs AVANT le cercle vide car un badge de niveau partiel
         // affiche a la fois le badge crafte et le cercle vide du niveau suivant.
-        if (html.includes('badge_info_unlocked') || html.includes('badge_icon')) return true;
+        let result = null;
+        if (html.includes('badge_info_unlocked') || html.includes('badge_icon')) result = true;
         // Badge non crafte : cercle vide (ex: "Niveau 0 - X cartes collectees sur Y")
-        if (html.includes('badge_empty_circle')) return false;
-        return null;
+        else if (html.includes('badge_empty_circle')) result = false;
+
+        // Seuls les resultats deterministes sont caches en DB (jamais les erreurs)
+        if (result !== null) setGameBadgeCrafted(appid, result);
+        return result;
     } catch (e) {
         ES_log(`[fetchBadgeCrafted] Erreur pour ${appid}: ${e.message}`);
         return null;
@@ -307,13 +398,35 @@ export async function fetchBadgeCrafted(appid, profileLink = null) {
 
 /**
  * Recupere les donnees Steam pour un badge (cartes du set) + statut badge crafte
+ *
+ * Cache anti rate-limit : si games.fetched_at date de moins de
+ * STEAM_CACHE_TTL.STEAM_DATA_MS et que les cartes existent en DB, les
+ * donnees DB sont reutilisees sans requete vers ajaxgetbadgeinfo (les
+ * rescans forces apres trade passent { force: true } pour bypasser).
+ *
  * @param {string} appid
  * @param {string} profileLink
- * @param {number} retries
+ * @param {Object} options - { force: true } pour bypasser le cache TTL,
+ *   { retries: 3 } nombre de tentatives
  */
-export async function fetchSteamData(appid, profileLink = null, retries = 3) {
+export async function fetchSteamData(appid, profileLink = null, options = {}) {
     const pl = profileLink || profilePath();
     if (isSteamEvent(appid)) return null;
+    const { force = false, retries = 3 } = options;
+
+    // Cache TTL : donnees Steam deja recuperees recemment -> reutilisation DB
+    // fetchBadgeCrafted garde son propre cache DB (badge_crafted), on le
+    // laisse s evaluer meme sur un cache-hit pour respecter son TTL
+    if (!force) {
+        const existingGame = getGame(appid);
+        if (existingGame?.fetched_at
+            && Date.now() - existingGame.fetched_at < STEAM_CACHE_TTL.STEAM_DATA_MS
+            && (getCards(appid) || []).length > 0) {
+            ES_log(`[fetchSteamData] ${appid}: donnees Steam fraiches (< ${STEAM_CACHE_TTL.STEAM_DATA_MS / 60000} min), reutilisees sans requete.`);
+            await fetchBadgeCrafted(appid);
+            return { ...existingGame, cards: getCards(appid) };
+        }
+    }
 
     const url = `https://steamcommunity.com/${pl}/ajaxgetbadgeinfo/${appid}`;
     ES_log(`[fetchSteamData] entree fonction ${appid}`);
@@ -364,16 +477,15 @@ export async function fetchSteamData(appid, profileLink = null, retries = 3) {
         upsertCards(appid, cards);
 
         // Badge deja genere par le COMPTE PRINCIPAL ? (best-effort : on garde la valeur existante si indetermine)
-        const badgeCrafted = await fetchBadgeCrafted(appid);
-        if (badgeCrafted !== null) {
-            setGameBadgeCrafted(appid, badgeCrafted);
-        }
+        // fetchBadgeCrafted ecrit lui-meme le resultat en DB (cache badge_crafted)
+        // et herite du mode force de fetchSteamData
+        await fetchBadgeCrafted(appid, null, { force });
 
         return { ...gameData, cards };
     } catch (error) {
         if (retries > 0) {
             await sleep(3000);
-            return await fetchSteamData(appid, profileLink, retries - 1);
+            return await fetchSteamData(appid, profileLink, { force, retries: retries - 1 });
         }
         return null;
     }
@@ -537,6 +649,11 @@ export async function syncSteamInventoryHistory(profileLink = null) {
         }
     }
 
+    // Nouveaux trades detectes : le cache inventaire est obsolete, on
+    // l invalide pour que le re-scan force recupere les assetIds a jour
+    if (updatedAppIds.size > 0) {
+        invalidateInventoryCache();
+    }
     return Array.from(updatedAppIds);
 }
 

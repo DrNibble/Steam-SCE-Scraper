@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS games (
     has_expensive_card_json        TEXT,
     total_cost_sce                 INTEGER DEFAULT 0,
     missing_count                  INTEGER DEFAULT 0,
-    badge_crafted                  INTEGER          -- NULL = pas encore verifie, 0 = pas de badge, 1 = badge deja genere
+    badge_crafted                  INTEGER,         -- NULL = pas encore verifie, 0 = pas de badge, 1 = badge deja genere
+    badge_crafted_fetched_at       INTEGER          -- date du dernier check gamecards (cache anti rate-limit)
 );
 
 CREATE TABLE IF NOT EXISTS cards (
@@ -119,6 +120,8 @@ export function initDB() {
         'ALTER TABLE cards ADD COLUMN steam_market_fetched_at INTEGER',
         // NULL par defaut : distingue "pas encore verifie" (NULL) de "verifie sans badge" (0)
         'ALTER TABLE games ADD COLUMN badge_crafted INTEGER',
+        // Date du dernier check badge_crafted (cache anti rate-limit steam.js)
+        'ALTER TABLE games ADD COLUMN badge_crafted_fetched_at INTEGER',
     ];
     for (const sql of migrations) {
         try { db.exec(sql); } catch { /* colonne deja presente */ }
@@ -214,12 +217,15 @@ export function getGamesWithCards() {
 }
 
 /**
- * Met a jour le statut "badge deja genere" d un jeu
+ * Met a jour le statut "badge deja genere" d un jeu + la date du check
+ * (badge_crafted_fetched_at sert de cache anti rate-limit pour
+ * fetchBadgeCrafted : un badge_crafted = 1 n est jamais re-checke)
  * @param {string} appid
  * @param {boolean} crafted - true si le badge a ete crafte par le profil
  */
 export function setGameBadgeCrafted(appid, crafted) {
-    db.prepare('UPDATE games SET badge_crafted = ? WHERE appid = ?').run(crafted ? 1 : 0, String(appid));
+    db.prepare('UPDATE games SET badge_crafted = ?, badge_crafted_fetched_at = ? WHERE appid = ?')
+        .run(crafted ? 1 : 0, Date.now(), String(appid));
 }
 
 // --- CARD helpers ---

@@ -1,5 +1,5 @@
 import { sleep, isSteamEvent, ES_log, getSteamProfilePath, setSteamCookie, getSteamCookie, httpGet } from './utils.js';
-import { getPageAppids, getAllPagesAppids, fetchSteamData, syncSteamInventoryHistory } from './steam.js';
+import { getPageAppids, getAllPagesAppids, fetchSteamData, syncSteamInventoryHistory, invalidateBadgePagesCache, invalidateInventoryCache } from './steam.js';
 import { fetchSCEFresh, fetchSCEGlobalInfo, isSCEBusy, resetCreditFlag } from './sce.js';
 import { analyzeBadgeStatus } from './analyze.js';
 import { getAllBadgeAppids, getIncompleteBadgeAppids, getGame, purgeCache, getMeta, setMeta, isDBEmpty, countGames } from './db.js';
@@ -29,10 +29,12 @@ const SCE_PARALLEL_WAITTIME_MAX = 1;
  * @param {string} profileLink
  * @param {Object} options - { market: false } pour differer fetchMarketPricesV2
  *   (utile pour lancer les prix marche en phase 2, apres que TOUS les badges
- *   soient a jour en DB via fetchSCEInventory)
+ *   soient a jour en DB via fetchSCEInventory) ; { forceSteam: true } pour
+ *   bypasser le cache TTL de fetchSteamData (rescans apres trade, commandes
+ *   manuelles) - par defaut false (scan complet daemon, TTL 30 min)
  */
 export async function processQueue(appids, profileLink = null, options = {}) {
-    const { market = true } = options;
+    const { market = true, forceSteam = false } = options;
     const pl = profileLink || getSteamProfilePath();
     const dbReadyAppids = [];
     const deferredAppids = [];
@@ -60,14 +62,15 @@ export async function processQueue(appids, profileLink = null, options = {}) {
 
             ES_log(`Traitement de ${appid}...`);
 
-            // 1. Scrap Steam (cartes + inventaire)
-            await fetchSteamData(appid, pl);
+            // 1. Scrap Steam (cartes + inventaire) - le cache TTL 30 min
+            // s'applique sauf forceSteam (rescans apres trade / commandes manuelles)
+            await fetchSteamData(appid, pl, { force: forceSteam });
 
             // 2. Scrap SCE (stock + worth + price + quick-trade)
             await fetchSCEFresh(appid);
 
             // File SCE saturee (waitTime > 1 min et pendingOffers > 10):
-            // l'appid est differe, il sera retente au prochain sync (10 min).
+            // l'appid est differe, il sera retente au prochain sync (5 min).
             // Pas d'analyse ni de prix marche pour lui ce cycle.
             if (isSCEBusy()) {
                 deferredAppids.push(appid);
@@ -92,7 +95,7 @@ export async function processQueue(appids, profileLink = null, options = {}) {
     await Promise.all(Array.from({ length: parallel }, () => worker()));
 
     // Appids differes (file SCE saturee): conserves en meta pour etre retentes
-    // au prochain sync (cycle de surveillance toutes les 10 min). Ceux qui ont
+    // au prochain sync (cycle de surveillance toutes les 5 min). Ceux qui ont
     // reussi ce cycle (dbReadyAppids) sont retires de la liste.
     const prevDeferred = getDeferredSCEAppids().filter(a => !dbReadyAppids.includes(a));
     saveDeferredSCEAppids([...new Set([...prevDeferred, ...deferredAppids])]);
@@ -181,14 +184,19 @@ export async function runMarketPhase(appids) {
  *   3. Phase 2: fetchMarketPricesV2 pour TOUS les badges (sequentiel), uniquement
  *      une fois que tous les badges sont a jour en DB, puis analyse de chaque badge
  * @param {string} profileLink
+ * @param {Object} options - { forceSteam: true } pour bypasser le cache TTL
+ *   Steam (commande manuelle npm run sync:badges)
  */
-export async function syncBadgesWorkflow(profileLink = null) {
+export async function syncBadgesWorkflow(profileLink = null, options = {}) {
     const pl = profileLink || getSteamProfilePath();
-    console.log('\n=== Workflow scan des badges (toutes les pages) ===\n');
+    const { forceSteam = false } = options;
+    const forceLabel = forceSteam ? ' (force, cache TTL bypass)' : ' (cache TTL actif)';
+    console.log(`\n=== Workflow scan des badges (toutes les pages)${forceLabel} ===\n`);
     console.log(`BD actuelle: ${countGames()} jeux.`);
 
-    // 1. Scan de toutes les pages de badges (p=1..N)
-    const pageAppids = await getAllPagesAppids(pl);
+    // 1. Scan de toutes les pages de badges (p=1..N) - force bypass le
+    // cache 1h de la liste d appids (commandes manuelles)
+    const pageAppids = await getAllPagesAppids(pl, { force: forceSteam });
     const appids = pageAppids.filter(i => !isSteamEvent(i.appid)).map(i => i.appid);
     console.log(`${appids.length} badges a scanner (hors evenements Steam).`);
 
@@ -196,9 +204,9 @@ export async function syncBadgesWorkflow(profileLink = null) {
     //    (4 taches paralleles si waitTime SCE < 1 min) - fetchMarketPricesV2
     //    est differe (options.market = false) -> seuls les badges dont
     //    fetchSteamData + fetchSCEFresh ont reussi (donc a jour en DB)
-    //    passent en phase 2
+    //    passent en phase 2. forceSteam passe le cache TTL Steam au travers.
     console.log('\n--- Phase 1: Steam + SCE (fetchSCEInventory) ---');
-    const dbReadyAppids = await processQueue(appids, pl, { market: false });
+    const dbReadyAppids = await processQueue(appids, pl, { market: false, forceSteam });
 
     const failed = appids.filter(a => !dbReadyAppids.includes(a));
     if (failed.length > 0) {
@@ -361,8 +369,10 @@ export async function mainWorkflow(profileLink = null) {
                 // re-scan des jeux concernes (délai réduit à 500ms)
                 const appIdsToRescan = [...new Set([...(updatedAppIds || []), ...deferredAppIds])];
                 if (appIdsToRescan.length > 0) {
-                    console.log(`[Workflow] ${appIdsToRescan.length} jeu(x) a re-scanner. Re-scan...`);
-                    await processQueue(appIdsToRescan, pl);
+                    console.log(`[Workflow] ${appIdsToRescan.length} jeu(x) a re-scanner. Re-scan force...`);
+                    // forceSteam: un trade vient d etre detecte, on bypass le
+                    // cache TTL de fetchSteamData pour ces appids
+                    await processQueue(appIdsToRescan, pl, { forceSteam: true });
                     console.log(`[Workflow] Re-scan termine pour ${appIdsToRescan.length} jeu(x).`);
                 }
             }
@@ -398,17 +408,19 @@ export async function mainWorkflowGamecards(appid, profileLink = null) {
         return;
     }
 
-    // Force le refresh
-    await processQueue([appid], pl);
+    // Force le refresh (commande manuelle : bypass du cache TTL)
+    await processQueue([appid], pl, { forceSteam: true });
 
     console.log('\n=== Workflow termine ===\n');
 }
 
 /**
- * Purge complete du cache
+ * Purge complete du cache (DB + caches memoire anti rate-limit)
  */
 export async function purgeAllCache() {
     purgeCache();
     resetCreditFlag();
+    invalidateBadgePagesCache();
+    invalidateInventoryCache();
     console.log('Cache purge avec succes.');
 }

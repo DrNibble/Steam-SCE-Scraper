@@ -63,7 +63,8 @@ async function main() {
                     setSteamCookie(cookies);
                 }
 
-                await syncBadgesWorkflow(getSteamProfilePath());
+                // Commande manuelle : bypass du cache TTL Steam
+                await syncBadgesWorkflow(getSteamProfilePath(), { forceSteam: true });
                 console.log('Termine.');
             }
             break;
@@ -113,7 +114,8 @@ async function main() {
             const badges = getAllBadgeAppids();
             const appids = badges.filter(b => !b.disabled).map(b => b.appid);
             console.log(`Scan de ${appids.length} badges...`);
-            await processQueue(appids, getSteamProfilePath());
+            // Commande manuelle : bypass du cache TTL Steam
+            await processQueue(appids, getSteamProfilePath(), { forceSteam: true });
             break;
         }
 
@@ -140,7 +142,8 @@ async function main() {
                 if (isEvent(appid)) continue;
                 try {
                     ESLOG(`Re-fetch ${appid}...`);
-                    await refetchSteamData(appid, pl);
+                    // Commande manuelle : bypass du cache TTL Steam
+                    await refetchSteamData(appid, pl, { force: true });
                     await SLEEP2(500);
                 } catch (e) {
                     console.error(`Erreur sur ${appid}:`, e.message);
