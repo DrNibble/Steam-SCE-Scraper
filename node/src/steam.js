@@ -325,9 +325,16 @@ const BADGE_PROFILE_PATH = process.env.BADGE_PROFILE_PATH || 'id/Dr_Nibble';
 /**
  * Verifie sur la page gamecards si le badge d un jeu a deja ete genere (crafte)
  * par le compte PRINCIPAL (BADGE_PROFILE_PATH), peu importe le niveau.
- * - Badge crafte : la page contient "badge_info_unlocked" (badge obtenu + date de deblocage)
- *   et/ou "badge_icon" (image du badge crafte, ex: "Level 2, 200 XP")
- * - Badge non crafte : la page contient "badge_empty_circle" (ex: "Niveau 0 - X cartes collectees sur Y")
+ *
+ * Strategie de detection (avec garde-fou contre les faux positifs):
+ *   1. On charge le HTML avec cheerio pour isoler la section du badge du compte principal
+ *   2. Badge crafte: la section principale contient "badge_info_unlocked" (badge obtenu)
+ *      ou "badge_icon" (image du badge crafte)
+ *   3. Badge non crafte: "badge_empty_circle" (cercle vide, ex: "Niveau 0")
+ *   4. On EXCLUT la section "badge_friends_have_earned" qui montre les badges
+ *      des amis et peut contenir des marqueurs similaires (faux positifs)
+ *   5. Garde-fou: si la page n est pas une page gamecards, retourne null
+ *
  * @param {string} appid
  * @param {string|null} profileLink - optionnel: autre profil a verifier (defaut: compte principal)
  * @returns {Promise<boolean|null>} true = deja genere, false = pas encore, null = indetermine (erreur)
@@ -340,16 +347,32 @@ export async function fetchBadgeCrafted(appid, profileLink = null) {
     try {
         const html = await httpGet(url, { cookies: steamCookie(), retries: 2 });
         if (!html) return null;
+
         // Garde-fou : si le compte n a aucune carte pour ce jeu, Steam redirige vers
         // la page /badges (remplie de badges crafte -> faux positif). On verifie donc
         // que la page recue est bien une page gamecards avant d appliquer les marqueurs.
         if (!html.includes('badge_gamecard_page')) return null;
+
+        // Charger le HTML avec cheerio pour isoler les sections
+        const $ = cheerio.load(html);
+
+        // Supprimer la section "badge_friends_have_earned" du DOM avant detection.
+        // Cette section liste les amis qui ont crafte le badge et peut contenir
+        // des marqueurs similaires (badge_icon, etc.) qui provoquent des faux positifs.
+        $('.badge_friends_have_earned').remove();
+        $('.badge_detail_tasks').remove();
+
+        // Extraire le texte de la page sans la section des amis
+        const cleanHtml = $('body').html() || '';
+
         // Badge crafte : la page montre le badge obtenu (image + date de deblocage).
         // On teste ces marqueurs AVANT le cercle vide car un badge de niveau partiel
         // affiche a la fois le badge crafte et le cercle vide du niveau suivant.
-        if (html.includes('badge_info_unlocked') || html.includes('badge_icon')) return true;
+        if (cleanHtml.includes('badge_info_unlocked') || cleanHtml.includes('badge_icon')) return true;
+
         // Badge non crafte : cercle vide (ex: "Niveau 0 - X cartes collectees sur Y")
-        if (html.includes('badge_empty_circle')) return false;
+        if (cleanHtml.includes('badge_empty_circle')) return false;
+
         return null;
     } catch (e) {
         ES_log(`[fetchBadgeCrafted] Erreur pour ${appid}: ${e.message}`);
