@@ -411,6 +411,7 @@ $profileLink = STEAM_PROFILE_PATH;
                         <?php if ($g['badgeCrafted'] === 1): ?>
                             <br><small style="color:#ff9d00;">Badge deja genere</small>
                         <?php endif; ?>
+                        <br><small>Possedees: <?= fmt($g['ownedTotal']) ?> / <?= fmt($g['setCards']) ?></small>
                     </td>
                     <td>
                         <?php foreach ($g['allCards'] as $c):
