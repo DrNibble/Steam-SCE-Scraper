@@ -286,7 +286,7 @@ ES_log("[getPageAppids] Entrée fonction");
                 const ownedText = info.isOwned ? " (Possédée 💰)" : " (Manquante 💸)";
                 // Vert si possédée, Orange si elle bloque le badge
                 const color = info.isOwned ? '#a3d200' : '#e67e22';
-                createStatusLabel(statusContainer, color, `💎 ${info.cardname} ($${info.marketusdprice})${ownedText}`);
+                createStatusLabel(statusContainer, color, `💎 ${info.cardname} (${info.marketeurprice != null ? info.marketeurprice.toFixed(2) + '€' : 'N/A'})${ownedText}`);
             }
         });
     };
