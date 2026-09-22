@@ -465,6 +465,7 @@ export async function fetchMarketPricesV2(appid, delayMs = 500) {
             priceMap.set(card.hash, {
                 priceEur: result.priceEur,
                 sales7d: result.sales7d || 0,
+                saleDate: result.saleDate ?? null,
             });
 
             ES_log(`[fetchMarketPricesV2] → ${result.source}: ${
