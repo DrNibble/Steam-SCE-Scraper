@@ -1076,18 +1076,15 @@ ES_log("[fetchSteamData] entrée fonction",appid);
             }
         };
 
-        // --- 2. BOUTON RAPPORT ---
+        // --- 2. BOUTON RAPPORT (front-end PHP localhost:8080) ---
         const reportBtn = document.createElement("a");
         reportBtn.id = "es-report-btn";
-        reportBtn.href = "javascript:void(0);";
+        reportBtn.href = "http://localhost:8080";
+        reportBtn.target = "_blank";
         reportBtn.className = "btn_grey_black btn_small_thin";
         reportBtn.style.margin = "5px";
         reportBtn.style.display = "inline-block";
-        reportBtn.innerHTML = "<span style='color: #a3d200;'>📊 Générer Rapport SCE</span>";
-
-        reportBtn.onclick = () => {
-            win.ES.generateReport();
-        };
+        reportBtn.innerHTML = "<span style='color: #a3d200;'>📊 Rapport SCE</span>";
 
         // Ajout des deux boutons à la zone cible
         target.prepend(reportBtn);
