@@ -140,7 +140,7 @@ foreach ($games as $g) {
         // une carte vendue dans les 7 derniers jours se vend mieux au marche
         // Steam qu au bot (credits), donc hors depot.
         $hashOk = $hashAppId === (string)$g['appid'];
-        if ($hashOk && !$botFull && $marketFresh && $marketPrice !== null && (($marketPrice > 0.09 && $sales7d === 0) || ($marketPrice < 0.09 && $sales7d > 0)) {
+        if ($hashOk && !$botFull && $marketFresh && $marketPrice !== null && (($marketPrice > 0.09 && $sales7d === 0) || ($marketPrice < 0.09 && $sales7d > 0))) {
             $c['_depositable'] = true;
             $toGive[] = $c;
         } else {
