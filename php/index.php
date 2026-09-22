@@ -272,12 +272,8 @@ $profileLink = STEAM_PROFILE_PATH;
     </div>
 
     <div class="status-bar">
-        <?php if ($pendingOffers > 0): ?>
-            <span class="status-item">File d'attente: <?= fmt($pendingOffers) ?> offres</span>
-        <?php endif; ?>
-        <?php if ($waitTime > 0): ?>
-            <span class="status-item">Temps d'attente: <?= $waitTime ?> min</span>
-        <?php endif; ?>
+        <span class="status-item">File d'attente: <?= fmt($pendingOffers) ?> offre(s)</span>
+        <span class="status-item">Temps d'attente: <?= $waitTime ?> min</span>
         <?php if ($lastTrade > 0): ?>
             <span class="status-item">Dernier trade: <?= date('d/m/Y H:i', (int)($lastTrade / 1000)) ?></span>
         <?php endif; ?>
@@ -315,9 +311,18 @@ $profileLink = STEAM_PROFILE_PATH;
                         <?php endif; ?>
                     </td>
                     <td class="price">
-                        <?php if (!empty($exp['_card']) && hasRecentSales($exp['_card'])): ?>
-                            <?= fmtEur($exp['_card']['steam_market_price_eur']) ?>
+                        <?php
+                        if (!empty($exp['_card']) && (int)($exp['_card']['steam_market_sales_7d'] ?? 0) > 0 && $exp['_card']['steam_market_price_eur'] !== null && $exp['_card']['steam_market_price_eur'] !== ''):
+                            // Vente dans les 7 derniers jours: on affiche le dernier prix vendu
+                            $cardRow = $exp['_card'];
+                            $fetchedAt = (int)($cardRow['steam_market_fetched_at'] ?? 0);
+                            $marketFresh = $fetchedAt > 0 && $fetchedAt >= ((time() * 1000) - 24 * 60 * 60 * 1000);
+                        ?>
+                            <?= fmtEur($cardRow['steam_market_price_eur']) ?>
                             <br><small>Vente < 7j</small>
+                            <?php if (!$marketFresh): ?>
+                                <br><small style="color:#ff9d00;">données obsolètes</small>
+                            <?php endif; ?>
                         <?php elseif (!empty($exp['_card']) && (int)($exp['_card']['steam_market_sales_7d'] ?? 0) === 0): ?>
                             <span class="stale">Pas de vente < 7j</span>
                         <?php else: ?>

@@ -142,22 +142,70 @@ async function _fetchSCEGlobalInfoInner() {
         }
 
         // --- Recuperation Credit ---
+        // Le site SCE a ete refait (Tailwind CSS, v=2025-08-18).
+        // On essaie plusieurs selecteurs pour retrouver le credit affiche.
         let rawCreditText = '';
+
+        // Strategie 1: ancien selecteur (peut encore fonctionner sur certains profils)
         const creditEl = $('.inventory-user-credits .number');
         if (creditEl.length > 0) {
             rawCreditText = creditEl.text();
-        } else {
-            const desktopCreditEl = $('nav .hidden.lg\\:block button div.ml-auto');
-            rawCreditText = desktopCreditEl.length > 0 ? desktopCreditEl.text() : '';
+            ES_log(`[fetchSCEGlobalInfo] Credit trouve via .inventory-user-credits .number: "${rawCreditText}"`);
         }
+
+        // Strategie 2: nav bar desktop (ancien selecteur)
+        if (!rawCreditText) {
+            const desktopCreditEl = $('nav .hidden.lg\\:block button div.ml-auto');
+            if (desktopCreditEl.length > 0) {
+                rawCreditText = desktopCreditEl.text();
+                ES_log(`[fetchSCEGlobalInfo] Credit trouve via nav button div.ml-auto: "${rawCreditText}"`);
+            }
+        }
+
+        // Strategie 3: chercher un element contenant un nombre + "credit" dans le nav
+        if (!rawCreditText) {
+            $('nav span, nav button, nav div').each((_, el) => {
+                const text = $(el).text().trim();
+                if (/^\d+\s*c$/i.test(text) || /^\d+\s*credits?$/i.test(text) || /^credits?:\s*\d+$/i.test(text)) {
+                    rawCreditText = text;
+                    ES_log(`[fetchSCEGlobalInfo] Credit trouve via text search nav: "${rawCreditText}"`);
+                    return false;
+                }
+            });
+        }
+
+        // Strategie 4: chercher dans le contenu du profil
+        if (!rawCreditText) {
+            $('main span, main div, main button').each((_, el) => {
+                const text = $(el).text().trim();
+                if (/^\d+\s*c$/i.test(text) || /^\d+\s*credits?$/i.test(text) || /^credits?:\s*\d+$/i.test(text)) {
+                    if (!/max/i.test(text)) {
+                        rawCreditText = text;
+                        ES_log(`[fetchSCEGlobalInfo] Credit trouve via text search main: "${rawCreditText}"`);
+                        return false;
+                    }
+                }
+            });
+        }
+
+        if (!rawCreditText) {
+            ES_log('[fetchSCEGlobalInfo] ATTENTION: impossible de trouver le credit dans le HTML du profil.');
+            const mainContent = $('main').text().trim().substring(0, 500);
+            ES_log(`[fetchSCEGlobalInfo] Contenu de <main>: ${mainContent}`);
+        }
+
         const sceCredit = parseInt(rawCreditText.replace(/\D/g, ''), 10) || 0;
         setMeta('scecredit', String(sceCredit));
 
-        // --- Recuperation Offres en Attente ---
+        // --- Recuperation Offres en Attente + Wait Time ---
+        // Ces infos sont affichees sur la page INVENTORY du SCE:
+        // <span>There are currently 0 offers pending. The average process time is 8 seconds.
+        // The estimated wait time is 0 minutes.</span>
         let pendingOffers = 0;
         let waitTime = 0;
         let foundStatus = false;
 
+        // Strategie 1: chercher dans le profil d'abord
         const infoSpans = $('div.bg-gray-light span, div.bg-gray-lighter span');
         infoSpans.each((_, span) => {
             const text = $(span).text();
@@ -169,19 +217,48 @@ async function _fetchSCEGlobalInfoInner() {
                 waitTime = waitMatch ? parseFloat(waitMatch[1]) : 0;
 
                 foundStatus = true;
-                return false; // break
+                return false;
             }
         });
 
+        // Strategie 2: si non trouve dans le profil, on fetch la page inventory
+        // qui contient systematiquement le statut du bot
         if (!foundStatus) {
-            console.warn('[SCE] Impossible de localiser les stats du bot dans le HTML.');
+            try {
+                const inventoryHtml = await httpGet('https://www.steamcardexchange.net/index.php?inventory', { cookies: getSCECookie() });
+                const $inv = cheerio.load(inventoryHtml);
+
+                $inv('span').each((_, span) => {
+                    const text = $inv(span).text();
+                    if (text.includes('offers pending')) {
+                        const pendingMatch = text.match(/(\d+)\s+offers\s+pending/i);
+                        pendingOffers = pendingMatch ? parseInt(pendingMatch[1], 10) : 0;
+
+                        const waitMatch = text.match(/wait\s+time\s+is\s+([\d.]+)\s+minutes/i);
+                        waitTime = waitMatch ? parseFloat(waitMatch[1]) : 0;
+
+                        foundStatus = true;
+                        return false;
+                    }
+                });
+
+                if (foundStatus) {
+                    ES_log('[fetchSCEGlobalInfo] Statut du bot recupere depuis la page inventory.');
+                }
+            } catch (invErr) {
+                ES_log(`[fetchSCEGlobalInfo] Erreur lors du fetch de la page inventory: ${invErr.message}`);
+            }
+        }
+
+        if (!foundStatus) {
+            console.warn('[SCE] Impossible de localiser les stats du bot (offers pending / wait time).');
         }
 
         setMeta('scePendingOffers', String(pendingOffers));
         setMeta('sceWaitTime', String(waitTime));
 
         creditFetched = true;
-        ES_log(`[fetchSCEGlobalInfo] Credit: ${sceCredit} | Queue: ${pendingOffers} offres.`);
+        ES_log(`[fetchSCEGlobalInfo] Credit: ${sceCredit} | Queue: ${pendingOffers} offres | WaitTime: ${waitTime} min.`);
     } catch (e) {
         console.warn('[fetchSCEGlobalInfo] Erreur:', e);
     }

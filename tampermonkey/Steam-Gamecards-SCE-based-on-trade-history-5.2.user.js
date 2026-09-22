@@ -530,6 +530,11 @@ ES_log("[getPageAppids] Entrée fonction");
                         statusContainer.innerHTML = `
                 <span style="color: #57cbde; font-weight: bold;">Crédit SCE : </span>
                 <span id="es-status-text">Initialisation...</span>
+                <br>
+                <span style="color: #57cbde; font-weight: bold;">File d'attente : </span>
+                <span id="es-status-queue">--</span>
+                <span style="color: #57cbde; font-weight: bold; margin-left: 10px;">Wait Time : </span>
+                <span id="es-status-waittime">--</span>
             `;
                         xpBlock.appendChild(statusContainer);
                     }
@@ -540,6 +545,16 @@ ES_log("[getPageAppids] Entrée fonction");
                     if (statusEl) {
                         const credit = win.ES.DATA.scecredit !== undefined ? `${win.ES.DATA.scecredit}c` : '--';
                         statusEl.innerHTML = `<span style="color:#fff">${credit}</span> ${txt}`;
+                    }
+                    const queueEl = document.getElementById('es-status-queue');
+                    if (queueEl) {
+                        const pending = win.ES.DATA.scePendingOffers !== undefined ? win.ES.DATA.scePendingOffers : '--';
+                        queueEl.innerHTML = `<span style="color:#fff">${pending}</span> offre(s)`;
+                    }
+                    const waitEl = document.getElementById('es-status-waittime');
+                    if (waitEl) {
+                        const wait = win.ES.DATA.sceWaitTime !== undefined ? `${win.ES.DATA.sceWaitTime} min` : '--';
+                        waitEl.innerHTML = `<span style="color:#fff">${wait}</span>`;
                     }
                 };
 
