@@ -184,6 +184,8 @@ foreach ($games as $g) {
         $depositList[] = [
             'name' => $g['gamename'],
             'appid' => $g['appid'],
+            'ownedTotal' => (int)($g['total_owned_qty'] ?? 0),
+            'setCards' => (int)($g['set_cards'] ?? 0),
             'cards' => array_values($toGive),
             'allCards' => $allOwned,
             'assetIds' => $assetIdsStr,
