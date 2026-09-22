@@ -21,7 +21,8 @@
     "sync-once": "node src/index.js --sync-once",
     "market": "node src/index.js --market start",
     "market:stats": "node src/index.js --market stats",
-    "market:enqueue": "node src/index.js --market enqueue"
+    "market:enqueue": "node src/index.js --market enqueue",
+    "api": "node src/api.js"
   },
   "dependencies": {
     "cheerio": "^1.0.0",

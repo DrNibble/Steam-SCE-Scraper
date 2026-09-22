@@ -4,6 +4,7 @@ import { STEAM_PROFILE_PATH, setSteamCookie, getSteamCookie, getSteamProfilePath
 import { getSteamCookies } from './auth.js';
 import { fetchMarketPricesV2, fetchSingleCardPrice } from './market.js';
 import { startMarketWorker, enqueueGameCards, enqueueMarketRefresh, enqueueStaleCards, getQueueStats, getCardPriceCached, PRIORITY } from './marketQueue.js';
+import { startApiServer } from './api.js';
 
 const args = process.argv.slice(2);
 
@@ -438,6 +439,14 @@ async function main() {
             break;
         }
 
+        case '--api':
+        case 'api':
+            // Serveur API standalone (lecture seule de la DB)
+            console.log('[API] Démarrage du serveur API...');
+            startApiServer();
+            console.log('[API] Serveur en cours. Ctrl+C pour arrêter.');
+            break;
+
         case '--help':
         case 'help':
         default:
@@ -452,6 +461,7 @@ Steam-SCE Scraper - Commandes disponibles:
   npm run sync:gamecards <appid>  Scanne un appid specifique
   npm run sync:history    Synchronise une fois l historique des trades
   npm run init-db         Initialise la base SQLite
+  npm run api             Démarre le serveur API REST (lecture seule de la DB)
   npm run market           Démarre le worker de marché temps réel (token bucket adaptatif)
   npm run -- --market stats   Stats de la queue de marché
   npm run -- --market price <hash>   Prix en cache d'une carte (stale-while-revalidate)
@@ -467,8 +477,10 @@ Steam-SCE Scraper - Commandes disponibles:
             break;
     }
 
-    // Ne pas appeler process.exit(0) pour le mode daemon et le worker de marché (start)
-    if (command !== 'sync' && command !== '--daemon' && command !== 'daemon') {
+    // Ne pas appeler process.exit(0) pour le mode daemon, le worker de marché (start)
+    // et le serveur API (ils gardent le process en vie)
+    if (command !== 'sync' && command !== '--daemon' && command !== 'daemon'
+        && command !== '--api' && command !== 'api') {
         // --market start garde le process en vie, mais --market stats/price/refresh/enqueue doivent quitter
         if (command === '--market' || command === 'market') {
             if (args[1] !== 'start' && args[1] !== undefined) {

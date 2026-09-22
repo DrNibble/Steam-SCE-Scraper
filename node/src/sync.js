@@ -6,6 +6,7 @@ import { getAllBadgeAppids, getIncompleteBadgeAppids, getGame, purgeCache, getMe
 import { getSteamCookies } from './auth.js';
 import { fetchMarketPricesV2, fetchSingleCardPrice } from './market.js';
 import { startMarketWorker, enqueueGameCards, enqueueStaleCards, getQueueStats, PRIORITY } from './marketQueue.js';
+import { startApiServer } from './api.js';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 // Intervalle du mode surveillance : scan de l historique des trades (tradehistory)
@@ -292,6 +293,14 @@ export async function mainWorkflow(profileLink = null) {
     console.log('[Workflow] Démarrage du worker de marché temps réel...');
     const marketWorker = startMarketWorker();
     console.log('[Workflow] Worker de marché démarré.\n');
+
+    // --- Démarrage du serveur API (REST) ---
+    // Expose les donnees de la DB en lecture seule (format win.ES.DATA)
+    // pour le script Tampermonkey. Bind 127.0.0.1 par defaut.
+    // Idempotent: ne crash pas si le serveur tourne deja.
+    console.log('[Workflow] Démarrage du serveur API...');
+    startApiServer();
+    console.log('[Workflow] Serveur API démarré.\n');
 
     // Horloge du scan complet : 0 = scan complet des au premier cycle
     // (DB deja remplie au demarrage) ; mis a Date.now() apres le scan

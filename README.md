@@ -17,6 +17,7 @@ steam-sce/
 │       ├── market.js       # Prix marché Steam (orderbook, pricehistory, buy orders)
 │       ├── marketQueue.js # Worker temps réel (token bucket, file prioritaire, stale-while-revalidate)
 │       ├── analyze.js     # Analyse des badges (completion, couts, cartes cheres)
+│       ├── api.js        # Serveur API REST (lecture seule de la DB)
 │       ├── sync.js        # Orchestration (workflow, queue, concurrence)
 │       └── index.js       # Point d'entree (CLI)
 ├── php/                   # Frontend PHP (rapport HTML)
@@ -284,12 +285,77 @@ Pour chaque carte, le worker récupère 3 endpoints et stocke :
 
 Conversions EUR : le buy order de l'orderbook est en USD - le taux effectif est calcule a partir du ratio `prix_vente_EUR / prix_vente_USD` (priceoverview / orderbook), fallback a 0.92. Les prix de la gamepage SCE sont convertis avec le taux BCE (frankfurter.app, cache 24h, surcharge `SCE_USD_TO_EUR`, fallback 0.92).
 
+## Serveur API REST
+
+Le module `api.js` expose les donnees de la base SQLite via une API HTTP REST en lecture seule. Il utilise le module `http` natif de Node (aucune dependance supplementaire).
+
+### Demarrage
+
+```bash
+npm run api
+```
+
+Le serveur demarre sur `http://127.0.0.1:3001` par defaut. Modifiez les variables d'environnement `API_HOST` et `API_PORT` dans `.env` pour changer l'hote et le port.
+
+Le serveur API est aussi demarre automatiquement par le mode daemon (`npm run sync`) en arriere-plan, en meme temps que le worker de marche.
+
+### Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/data` | Dump complet (jeux + cartes + meta) au format `win.ES.DATA` pour le script Tampermonkey |
+| `GET /api/games` | Liste de tous les jeux (resume, sans les cartes) |
+| `GET /api/games/:appid` | Un jeu detaille avec ses cartes |
+| `GET /api/meta` | Toutes les cles-valeurs de la table `meta` |
+| `GET /api/badges` | Tous les `badge_appids` |
+| `GET /api/status` | Resume de la base (comptages, scecredit, lasttrade) |
+
+### Format des donnees
+
+L'endpoint `/api/data` retourne un objet JSON plat compatible avec le script Tampermonkey :
+
+```json
+{
+  "scecredit": 12,
+  "scePendingOffers": 0,
+  "sceWaitTime": 0,
+  "lasttrade": 123456789,
+  "485450": {
+    "appid": "485450",
+    "gamename": "SEUM",
+    "setCards": 5,
+    "fetchedAt": 123456789,
+    "badgeCrafted": false,
+    "isCompletableViaSCE": true,
+    "totalCostSCE": 3,
+    "missingCount": 2,
+    "cards": [
+      {
+        "name": "Card Name",
+        "qty": 1,
+        "hash": "485450-Card Name",
+        "sce stock": 3,
+        "sce worth": 1,
+        "sce price": 1,
+        "sce marketPriceUSD": 0.05,
+        "sce quick-trade": "https://..."
+      }
+    ]
+  }
+}
+```
+
+### Securite
+
+Le serveur est bind sur `127.0.0.1` par defaut : les donnees ne sont pas exposees sur le reseau. Les en-tetes CORS (`Access-Control-Allow-Origin: *`) permettent au script Tampermonkey de faire des requetes depuis les pages Steam.
+
 ## Workflow
 
 1. Le scraper Node.js recupere les donnees Steam (badges toutes pages, inventaire, historique) et SCE (prix, stock, prix gamepage USD)
 2. Les donnees sont stockees dans SQLite (phase 1 : inventaire SCE, phase 2 : prix marche)
-3. Le worker de marché récupère les prix (token bucket, file prioritaire, au plus 1 fetch par carte et par 24h)
-4. Le front-end PHP lit SQLite et genere le rapport HTML (cartes cheres, completables, depot)
+3. Le worker de marche recupere les prix (token bucket, file prioritaire, au plus 1 fetch par carte et par 24h)
+4. Le serveur API expose les donnees en lecture seule pour le script Tampermonkey
+5. Le front-end PHP lit SQLite et genere le rapport HTML (cartes cheres, completables, depot)
 
 ## Commandes disponibles
 
@@ -303,6 +369,7 @@ Conversions EUR : le buy order de l'orderbook est en USD - le taux effectif est 
 | `npm run sync:gamecards <appid>` | Scanne un appid specifique |
 | `npm run sync:history` | Synchronise l'historique des trades |
 | `npm run init-db` | Initialise la base SQLite |
+| `npm run api` | Démarre le serveur API REST (lecture seule de la DB) |
 | `npm run market` | Démarre le worker de marché temps réel |
 | `npm run -- --market stats` | Stats de la queue de marché |
 | `npm run -- --market price <hash>` | Prix en cache d'une carte |
