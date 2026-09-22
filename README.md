@@ -75,7 +75,7 @@ Ce mode :
 2. Si la BD est remplie : passe directement en mode surveillance (un scan complet part dès le premier cycle)
 3. En mode surveillance :
    - `syncSteamInventoryHistory` toutes les **5 minutes** (les badges differes par le bot SCE sont retentes a chaque cycle, avec re-scan cible des jeux touches par des trades)
-   - scan complet des badges (toutes les pages, phases 1 + 2, comme `npm run sync:badges`) toutes les **15 minutes** - le re-scan cible est skippe sur ces cycles car le scan complet couvre deja ces appids
+   - scan complet des badges (toutes les pages, phases 1 + 2, comme `npm run sync:badges`) toutes les **15 minutes** - le re-scan cible est skippe sur ces cycles car le scan complet couvre deja ces appids. Lors de ce scan, l'option `refetchCrafted` est activee : les badges deja craftes (`badge_crafted = 1`) sont re-verifies systematiquement (voir [Caches anti rate-limit](#caches-anti-rate-limit-steam))
 
 ### Scanner un appid specifique
 
@@ -158,7 +158,7 @@ Tous les appels vers steamcommunity.com sont mis en cache (constantes `STEAM_CAC
 
 **Invalidation** : des qu un nouveau trade est detecte (`syncSteamInventoryHistory`), le cache inventaire est invalide et les jeux concernes sont re-scannes en force (`forceSteam: true`), donc la fraicheur des donnees apres un trade est preservee.
 
-**Bypass** : les commandes manuelles contournent ces TTL - `npm run sync:badges`, `npm run sync:gamecards <appid>`, `npm run -- --scan-all` et `npm run -- --refetch-cards` passent `forceSteam: true`. Le scan complet automatique du daemon (15 min) utilise les TTL : en pratique les donnees Steam sont re-fetchees toutes les 30 min et les pages de badges toutes les heures.
+**Bypass** : les commandes manuelles contournent ces TTL - `npm run sync:badges`, `npm run sync:gamecards <appid>`, `npm run -- --scan-all` et `npm run -- --refetch-cards` passent `forceSteam: true`. Le scan complet automatique du daemon (15 min) utilise les TTL : en pratique les donnees Steam sont re-fetchees toutes les 30 min et les pages de badges toutes les heures. Toutefois, le daemon active l'option `refetchCrafted` qui bypass specifiquement le skip de `badge_crafted = 1` : les badges deja craftes sont re-verifies a chaque scan complet (la page gamecards est re-fetchee), contrairement au comportement par defaut qui les skippe (un badge crafte ne disparait pas).
 
 ## Worker de marché temps réel
 
