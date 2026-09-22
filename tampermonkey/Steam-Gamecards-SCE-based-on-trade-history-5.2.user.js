@@ -249,46 +249,88 @@ ES_log("[getPageAppids] Entrée fonction");
                 if (target) target.appendChild(statusContainer);
             }
             statusContainer.innerHTML = ''; // Reset
-
-            // --- RENDU DES LABELS ---
-
-            // 1. VERT : Steam Trade (Doublons physiques déjà présents sur Steam)
-            if (data.isCompletableViaTrade) {
-                createStatusLabel(statusContainer, '#a3d200', '✔ Prêt : Craft possible via échange');
-            }
-
-            // 2. BLEU : SCE Status (Crédits suffisants)
-            if (data.isCompletableViaSCE) {
-                const label = createStatusLabel(statusContainer, '#66c0f4', `🔹 Achetable via SCE (Coût: ${data.totalCostSCE}c)`);
-                label.style.cursor = "pointer";
-                label.onclick = (e) => {
-                    e.stopPropagation();
-                    window.open(`https://www.steamcardexchange.net/index.php?inventorygame-appid-${currentAppid}`, '_blank');
-                };
-            }
-
-            // 3. MAUVE : SCE Doublon (Le bot a le stock ET tu as assez de crédits/matière)
-            // On ne l'affiche que si on n'a pas déjà le badge "Steam Trade" pour éviter le doublon visuel
-            if (data.isCompletableviaSCEdoublon && !data.isCompletableViaTrade) {
-                createStatusLabel(statusContainer, '#a55eea', `♻ Échangeable : Stock Bot OK + Crédits OK`);
-            }
-
-            // 4. GRIS / ROUGE : SCE WO Budget (Potentiel technique sans condition de crédit)
-            // Affiché seulement si on n'a pas assez de crédits (sinon le label BLEU suffit)
-            if (data.isCompletableviaSCEwobudget && !data.isCompletableViaSCE && !data.isCompletableviaSCEdoublon) {
-                const creditManquant = data.totalCostSCE - (win.ES.DATA.scecredit || 0);
-                createStatusLabel(statusContainer, '#95a5a6', `ℹ Dispo chez SCE (Manque ${creditManquant}c)`);
-            }
-
-            // 5. ORANGE : Carte de valeur (Attention / Investissement)
-            if (data.hasExpensiveCard) {
-                const info = data.hasExpensiveCard;
-                const ownedText = info.isOwned ? " (Possédée 💰)" : " (Manquante 💸)";
-                // Vert si possédée, Orange si elle bloque le badge
-                const color = info.isOwned ? '#a3d200' : '#e67e22';
-                createStatusLabel(statusContainer, color, `💎 ${info.cardname} (${info.marketeurprice != null ? info.marketeurprice.toFixed(2) + '€' : 'N/A'})${ownedText}`);
-            }
+            win.ES.renderStatusLabels(currentAppid, statusContainer);
         });
+    };
+
+    // --- RENDU DES LABELS (réutilisable) ---
+    // Affiche les labels de statut pour un appid donné dans le conteneur fourni.
+    // Utilisé par updateBadgeUI (page /badges) et renderGamecardStatus (page /gamecards).
+    win.ES.renderStatusLabels = function(appid, statusContainer) {
+        const data = win.ES.DATA[appid];
+        if (!data || typeof data === 'undefined') return;
+
+        // 1. VERT : Steam Trade (Doublons physiques déjà présents sur Steam)
+        if (data.isCompletableViaTrade) {
+            createStatusLabel(statusContainer, '#a3d200', '✔ Prêt : Craft possible via échange');
+        }
+
+        // 2. BLEU : SCE Status (Crédits suffisants)
+        if (data.isCompletableViaSCE) {
+            const label = createStatusLabel(statusContainer, '#66c0f4', `🔹 Achetable via SCE (Coût: ${data.totalCostSCE}c)`);
+            label.style.cursor = "pointer";
+            label.onclick = (e) => {
+                e.stopPropagation();
+                window.open(`https://www.steamcardexchange.net/index.php?inventorygame-appid-${appid}`, '_blank');
+            };
+        }
+
+        // 3. MAUVE : SCE Doublon (Le bot a le stock ET tu as assez de crédits/matière)
+        // On ne l'affiche que si on n'a pas déjà le badge "Steam Trade" pour éviter le doublon visuel
+        if (data.isCompletableviaSCEdoublon && !data.isCompletableViaTrade) {
+            createStatusLabel(statusContainer, '#a55eea', `♻ Échangeable : Stock Bot OK + Crédits OK`);
+        }
+
+        // 4. GRIS / ROUGE : SCE WO Budget (Potentiel technique sans condition de crédit)
+        // Affiché seulement si on n'a pas assez de crédits (sinon le label BLEU suffit)
+        if (data.isCompletableviaSCEwobudget && !data.isCompletableViaSCE && !data.isCompletableviaSCEdoublon) {
+            const creditManquant = data.totalCostSCE - (win.ES.DATA.scecredit || 0);
+            createStatusLabel(statusContainer, '#95a5a6', `ℹ Dispo chez SCE (Manque ${creditManquant}c)`);
+        }
+
+        // 5. ORANGE : Carte de valeur (Attention / Investissement)
+        if (data.hasExpensiveCard) {
+            const info = data.hasExpensiveCard;
+            const ownedText = info.isOwned ? " (Possédée 💰)" : " (Manquante 💸)";
+            // Vert si possédée, Orange si elle bloque le badge
+            const color = info.isOwned ? '#a3d200' : '#e67e22';
+            createStatusLabel(statusContainer, color, `💎 ${info.cardname} (${info.marketeurprice != null ? info.marketeurprice.toFixed(2) + '€' : 'N/A'})${ownedText}`);
+        }
+    };
+
+    // --- RENDU DES LABELS SUR LA PAGE GAMECARDS ---
+    // Crée un conteneur de statut sur la page /gamecards/:appid et affiche les labels.
+    win.ES.renderGamecardStatus = function(appId) {
+        const data = win.ES.DATA[appId];
+        if (!data || typeof data === 'undefined') {
+            ES_log(`[renderGamecardStatus] Pas de données pour ${appId}`);
+            return;
+        }
+
+        // Cherche un conteneur existant ou en crée un nouveau
+        let statusContainer = document.querySelector('.es-gamecard-status');
+        if (!statusContainer) {
+            statusContainer = document.createElement('div');
+            statusContainer.className = 'es-gamecard-status es-status-container';
+            statusContainer.style.cssText = 'margin: 10px 0; font-size: 11px; font-weight: bold; display: flex; flex-direction: column; gap: 4px;';
+
+            // Insère le conteneur avant la grille de cartes
+            const target = document.querySelector('.badge_detail_card_set')
+                || document.querySelector('.badge_cards')
+                || document.querySelector('.badge_title')
+                || document.querySelector('.maincontent');
+            if (target) {
+                target.parentNode.insertBefore(statusContainer, target);
+            } else {
+                // Fallback: ajouter au début du contenu principal
+                const main = document.querySelector('.responsive_page_template_content');
+                if (main) main.prepend(statusContainer);
+            }
+        }
+        statusContainer.innerHTML = ''; // Reset
+
+        win.ES.renderStatusLabels(appId, statusContainer);
+        ES_log(`[renderGamecardStatus] Labels rendus pour ${appId}`);
     };
 
     function createStatusLabel(container, color, text) {
@@ -509,6 +551,7 @@ ES_log("[getPageAppids] Entrée fonction");
                     if (win.ES.injectQuickTradeButtons) {
                         setTimeout(() => {
                             win.ES.injectQuickTradeButtons(appId);
+                            win.ES.renderGamecardStatus(appId);
                         }, 500);
                     }
                     return;
