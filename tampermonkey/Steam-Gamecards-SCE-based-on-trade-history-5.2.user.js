@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Steam-Gamecards-SCE based on trade history (utilisation ajax)
+// @name         Steam-Gamecards-SCE based on API
 // @namespace    http://tampermonkey.net/
-// @version      5.2
+// @version      0.1
 // @description  Scrap complet Steam & SCE avec cache persistant, workers et API REST
-// @author       Gemini
+// @author       DrNibble
 // @match        https://steamcommunity.com/profiles/*/badges*
 // @match        https://steamcommunity.com/my/badges*
 // @match        https://steamcommunity.com/profiles/*/gamecards*
