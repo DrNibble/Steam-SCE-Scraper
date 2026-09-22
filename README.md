@@ -7,15 +7,16 @@ Conversion en Node.js du script Tampermonkey "Steam-Gamecards-SCE" avec base de 
 ```
 steam-sce/
 ├── node/                  # Backend Node.js (scraper)
-│   ├── .env.example       # Configuration (cookies, chemin DB)
+│   ├── .env.example       # Configuration (cookies, cle API, chemin DB)
 │   ├── package.json
 │   └── src/
 │       ├── db.js          # Couche SQLite (schema, CRUD)
 │       ├── utils.js       # Utilitaires (HTTP, clean, isSteamEvent, etc.)
+│       ├── steamApi.js    # Client Steam Web API officiel (rate limit, GetInventory, GetTradeHistory, GetAssetPrices)
 │       ├── steam.js       # Scraping Steam (badges, inventaire, historique trades)
 │       ├── sce.js         # Scraping Steam Card Exchange (prix, stock, credits)
-│       ├── market.js       # Prix marché Steam (orderbook, pricehistory, buy orders)
-│       ├── marketQueue.js # Worker temps réel (token bucket, file prioritaire, stale-while-revalidate)
+│       ├── market.js       # Prix marche Steam (orderbook, pricehistory, buy orders, GetAssetPrices)
+│       ├── marketQueue.js # Worker temps reel (token bucket, file prioritaire, stale-while-revalidate)
 │       ├── analyze.js     # Analyse des badges (completion, couts, cartes cheres)
 │       ├── sync.js        # Orchestration (workflow, queue, concurrence)
 │       └── index.js       # Point d'entree (CLI)
@@ -44,9 +45,24 @@ cp .env.example .env
 npm install
 ```
 
-### 2. Configuration des cookies
+### 2. Configuration
 
-Editez le fichier `.env` et renseignez vos cookies de session :
+Editez le fichier `.env` et renseignez vos parametres :
+
+#### Clé API Steam Web API
+
+- **STEAM_API_KEY** : Clé API Steam obtenue sur [https://steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey)
+  - **Option 1 — Manuel** : définissez `STEAM_API_KEY` dans `.env` avec votre clé
+  - **Option 2 — Automatique (recommandé)** : laissez `STEAM_API_KEY` vide dans `.env`. Après authentification Steam (login ou daemon), le projet récupère automatiquement votre clé API depuis la page [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey) en utilisant vos cookies de session. Aucune action manuelle nécessaire.
+  - Cette clé permet d'utiliser les endpoints officiels de la Steam Web API :
+    - **GetTradeHistory** (`IEconService/GetTradeHistory/v1`) : historique des trades en JSON structuré
+    - **GetAssetPrices** (`ISteamEconomy/GetAssetPrices/v1`) : prix des assets d'une app economy
+    - **GetInventory** (`IInventoryService/GetInventory/v1`) : inventaire d'un utilisateur
+  - GetTradeHistory et GetAssetPrices fonctionnent avec la clé utilisateur
+  - GetInventory nécessite une clé **publisher** Steamworks (Economy permissions) ; en cas d'échec (clé utilisateur), le système fait un fallback automatique vers l'endpoint communautaire
+  - Si aucune clé n'est disponible (ni `.env`, ni fetch automatique), le projet utilise les méthodes historiques (scraping HTML, endpoints communautaires)
+
+#### Cookies de session
 
 - **STEAM_COOKIE** : Cookie de session Steam (format header complet, ex: `steamLoginSecure=...; sessionid=...`)
   - DevTools > Application > Cookies > steamcommunity.com
@@ -61,6 +77,70 @@ Editez le fichier `.env` et renseignez vos cookies de session :
 ```bash
 npm run init-db
 ```
+
+## Steam Web API officielle
+
+Le projet supporte les endpoints officiels de la Steam Web API via le module `steamApi.js`. Lorsque `STEAM_API_KEY` est configuree, les fonctions de fetch utilisent ces endpoints en priorite, avec fallback vers les methodes communautaires.
+
+### Endpoints implantes
+
+| Endpoint | Interface | URL | Cl requise | Description |
+|----------|-----------|-----|------------|-------------|
+| GetTradeHistory | IEconService | `https://api.steampowered.com/IEconService/GetTradeHistory/v1/` | Utilisateur | Historique des trades en JSON structure |
+| GetAssetPrices | ISteamEconomy | `https://api.steampowered.com/ISteamEconomy/GetAssetPrices/v1/` | Utilisateur | Prix des assets d une app economy |
+| GetInventory | IInventoryService | `https://partner.steam-api.com/IInventoryService/GetInventory/v1/` | Publisher (Economy) | Inventaire d un utilisateur |
+
+### Documentation des endpoints
+
+- [IEconService](https://partner.steamgames.com/doc/webapi/ieconservice) — GetTradeHistory
+- [ISteamEconomy](https://partner.steamgames.com/doc/webapi/isteameconomy) — GetAssetPrices
+- [IInventoryService](https://partner.steamgames.com/doc/webapi/IInventoryService) — GetInventory
+
+### Rate limiting
+
+Le module `steamApi.js` implémente un rate limiter global pour toutes les requetes vers la Steam Web API officielle :
+
+- **1 requete/seconde** : espacement minimum de 1000ms entre chaque requete
+- **100 000 requetes/jour** : compteur journalier, reinitialise a minuit UTC
+- Les deux limites sont appliquees simultanement (le debit de 1 req/s correspond a 86 400 req/jour theorique, mais la limite journaliere de 100 000 est conservee par securite)
+- File d attente globale : garantit l espacement meme en cas de requetes paralleles
+
+### Integration dans le code
+
+| Fonction | Avant (scraping) | Apres (API officielle + fallback) |
+|----------|------------------|-----------------------------------|
+| `fetchInventory()` | Endpoint communautaire `/inventory/json/753/6/` | `IInventoryService/GetInventory` (si cle publisher), fallback automatique vers endpoint communautaire |
+| `syncSteamInventoryHistory()` | Scraping HTML de `/inventoryhistory/` | `IEconService/GetTradeHistory` (JSON structure), fallback vers scraping HTML |
+| `getAssetPricesForApp()` | (non disponible) | `ISteamEconomy/GetAssetPrices` (pour les apps economy compatibles) |
+
+### Note sur GetAssetPrices et les cartes Steam Community
+
+L'endpoint `GetAssetPrices` ne s'applique qu'aux "steam economy apps" (ex: TF2 appid 440, Dota 2 appid 570). Les cartes Steam Community (appid 753) ne sont PAS une steam economy app traditionnelle. `GetAssetPrices` ne retourne donc pas de donnees utiles pour les cartes. Les endpoints communautaires (`priceoverview`, `pricehistory`, `orderbook`) restent le seul moyen d obtenir les prix des cartes Steam Community. La fonction `getAssetPricesForApp()` est disponible pour les apps compatibles.
+
+### Rate limiting: endpoints officiels vs communautaires
+
+Le projet applique deux systemes de rate limiting distincts :
+
+- **Steam Web API officielle** (`steamApi.js`) : 1 req/s et 100 000 req/jour, appliques a tous les appels via `steamApiFetch()` (GetTradeHistory, GetAssetPrices, GetInventory). Ce rate limiter est global et garantit l espacement meme en cas de requetes paralleles.
+- **Endpoints communautaires** (market.js, marketQueue.js) : token bucket adaptatif avec rafales de 5 et 1 req/600ms (~100 req/min), backoff sur 429. Ces endpoints ont leurs propres limites Steam (~120 req/min) distinctes de l'API officielle.
+
+Les deux systemes coexistent car les limites Steam sont differentes pour l'API officielle et les endpoints communautaires.
+
+### Obtenir sa clé API Steam
+
+**Méthode automatique (recommandée)** :
+
+Aucune action requise. Après authentification Steam (`npm run login` ou `npm run sync`), le projet récupère automatiquement votre clé API depuis la page [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey) en utilisant vos cookies de session.
+
+**Méthode manuelle** :
+
+1. Connectez-vous à Steam sur [https://steamcommunity.com](https://steamcommunity.com)
+2. Allez sur [https://steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey)
+3. Entrez un nom de domaine (n'importe lequel, ex: `localhost`)
+4. Copiez la clé affichée (format: 32 caractères hexadécimaux)
+5. Ajoutez-la dans `.env` : `STEAM_API_KEY=votre_cle_ici`
+
+La clé est liée à votre compte Steam. Ne la partagez jamais et ne la commitez pas dans git.
 
 ## Utilisation
 
@@ -257,9 +337,10 @@ Conversions EUR : le buy order de l'orderbook est en USD - le taux effectif est 
 ## Workflow
 
 1. Le scraper Node.js recupere les donnees Steam (badges toutes pages, inventaire, historique) et SCE (prix, stock, prix gamepage USD)
-2. Les donnees sont stockees dans SQLite (phase 1 : inventaire SCE, phase 2 : prix marche)
-3. Le worker de marché récupère les prix en quasi temps réel (token bucket, file prioritaire)
-4. Le front-end PHP lit SQLite et genere le rapport HTML (cartes cheres, completables, depot)
+2. Si `STEAM_API_KEY` est configuree, les endpoints officiels de la Steam Web API sont utilises en priorite (GetTradeHistory, GetInventory, GetAssetPrices) avec fallback automatique
+3. Les donnees sont stockees dans SQLite (phase 1 : inventaire SCE, phase 2 : prix marche)
+4. Le worker de marché récupère les prix en quasi temps réel (token bucket, file prioritaire)
+5. Le front-end PHP lit SQLite et genere le rapport HTML (cartes cheres, completables, depot)
 
 ## Commandes disponibles
 

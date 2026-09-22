@@ -10,8 +10,18 @@
  *   1. /market/priceoverview — prix de vente EUR, prix médian, volume (pas d'auth)
  *   2. /market/orderbook  — buy/sell orders, quantités (pas d'auth requise, mais cookies envoyés)
  *   3. /market/pricehistory — historique des ventes, volume 7j, prix médian 7j (requiert steamLoginSecure)
+ *   4. ISteamEconomy/GetAssetPrices — API officielle pour les apps economy (ex: TF2=440, Dota2=570)
  *
- * Ces endpoints ne sont pas officiels/documentés par Valve.
+ * Note sur GetAssetPrices :
+ *   L'endpoint GetAssetPrices de l'API officielle Steam Web API ne s'applique
+ *   qu'aux "steam economy apps" (440=TF2, 570=Dota2, etc.). Les cartes Steam
+ *   Community (appid 753) ne sont PAS une steam economy app traditionnelle.
+ *   GetAssetPrices ne retourne donc pas de données utiles pour les cartes.
+ *   Les endpoints communautaires (priceoverview, pricehistory, orderbook)
+ *   restent le seul moyen d'obtenir les prix des cartes Steam Community.
+ *   GetAssetPrices est exposé via getAssetPricesForApp() pour les apps compatibles.
+ *
+ * Ces endpoints communautaires ne sont pas officiels/documentés par Valve.
  * Ils sont utilisés par la page Steam Community Market actuelle (SSR/React).
  *
  * Intégration dans le projet Steam-SCE-Scraper :
@@ -28,6 +38,7 @@
 
 import { httpGet, httpGetJSON, sleep, getSteamCookie, ES_log } from './utils.js';
 import { getCards, updateCardMarketPrices } from './db.js';
+import { hasSteamApiKey, getAssetPrices as apiGetAssetPrices } from './steamApi.js';
 
 const STEAM_AJAX_HEADERS = {
     'Referer': 'https://steamcommunity.com/',
@@ -35,6 +46,48 @@ const STEAM_AJAX_HEADERS = {
 };
 
 const MARKET_APPID = 753; // Toujours 753 pour les cartes Steam Community
+
+
+// ═══════════════════════════════════════════════════════════════
+// 0b) Steam Web API officielle -- GetAssetPrices
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Recupere les prix des assets d une application via l API officielle.
+ *
+ * Endpoint: GET https://api.steampowered.com/ISteamEconomy/GetAssetPrices/v1/
+ * Documentation: https://partner.steamgames.com/doc/webapi/isteameconomy
+ *
+ * Note: L appid doit etre une steam economy app (ex: 440 pour TF2, 570 pour Dota 2).
+ * Pour les cartes Steam Community (appid 753), cet endpoint peut ne pas retourner
+ * de donnees utiles car 753 n est pas une steam economy app traditionnelle.
+ * Dans ce cas, les endpoints communautaires (priceoverview, pricehistory) restent utilises.
+ *
+ * @param {number} appid - L ID de l application
+ * @param {object} [options]
+ * @param {string} [options.currency] - Code devise (ex: EUR)
+ * @param {string} [options.language] - Langue (ex: english)
+ * @returns {Promise<object|null>} - Reponse de l API ou null si indisponible
+ */
+export async function getAssetPricesForApp(appid, options = {}) {
+    if (!hasSteamApiKey()) {
+        ES_log(`[getAssetPricesForApp] STEAM_API_KEY non configuree, skip.`);
+        return null;
+    }
+
+    try {
+        const result = await apiGetAssetPrices(appid, options);
+        if (result && result.result && result.result.success) {
+            ES_log(`[getAssetPricesForApp] ${result.result.assets?.length || 0} assets recuperes pour appid ${appid}.`);
+            return result.result;
+        }
+        ES_log(`[getAssetPricesForApp] Pas de succes pour appid ${appid}.`);
+        return null;
+    } catch (err) {
+        ES_log(`[getAssetPricesForApp] Erreur pour appid ${appid}: ${err.message}`);
+        return null;
+    }
+}
 
 
 // ═══════════════════════════════════════════════════════════════

@@ -1,6 +1,7 @@
 import * as cheerio from 'cheerio';
-import { httpGet, httpGetJSON, clean, isSteamEvent, sleep, parseSteamDateToMs, getSteamCookie, getSteamProfilePath, extractSessionIdFromCookies, INVENTORY_PAGE_DELAY, ES_log } from './utils.js';
+import { httpGet, httpGetJSON, clean, isSteamEvent, sleep, parseSteamDateToMs, getSteamCookie, getSteamProfilePath, extractSessionIdFromCookies, extractSteamIdFromCookies, INVENTORY_PAGE_DELAY, ES_log } from './utils.js';
 import { upsertBadgeAppid, upsertGame, upsertCards, getMeta, setMeta, getGame, getBadgeAppid, getCards, updateCardMarketPrices, setGameBadgeCrafted } from './db.js';
+import { hasSteamApiKey, getInventory as apiGetInventory, getTradeHistory as apiGetTradeHistory, getCurrentSteamId } from './steamApi.js';
 
 // Cookie Steam dynamique (recupere via auth.js ou .env)
 function steamCookie() { return getSteamCookie(); }
@@ -154,6 +155,15 @@ export async function getAllPagesAppids(profileLink = null) {
 
 /**
  * Recupere les donnees d'inventaire Steam de maniere paginee
+ *
+ * Strategie:
+ *   1. Si STEAM_API_KEY est configuree: utilise IInventoryService/GetInventory (API officielle)
+ *      - Note: GetInventory necessite une cle publisher Steamworks (Economy permissions).
+ *        Si la cle est une cle utilisateur (steamcommunity.com/dev/apikey), l'API retournera
+ *        une erreur 403 et on fallback automatiquement vers l'endpoint communautaire.
+ *   2. Sinon (ou fallback): utilise l'endpoint communautaire steamcommunity.com/inventory/json/753/6/
+ *      avec les cookies steamLoginSecure (comportement historique).
+ *
  * @param {string} profileLink - "my" ou SteamID64
  * @returns {Promise<Object>} {rgInventory, rgDescriptions}
  */
@@ -181,6 +191,45 @@ async function _fetchInventory(pl) {
 
     ES_log('[fetchInventory] Debut de la recuperation complete...');
 
+    // --- Tentative via API officielle (IInventoryService/GetInventory) ---
+    if (hasSteamApiKey()) {
+        const steamId = getCurrentSteamId() || (pl.startsWith('profiles/') ? pl.replace('profiles/', '') : null);
+        if (steamId) {
+            ES_log(`[fetchInventory] Tentative via API officielle (steamid=${steamId})...`);
+            try {
+                const result = await apiGetInventory(steamId, 753, { contextid: 6, fallbackToCommunity: false });
+                if (result && result.assets && result.assets.length > 0) {
+                    // Convertir le format API (assets/descriptions arrays) au format communautaire (rgInventory/rgDescriptions dict)
+                    const rgInventory = {};
+                    const rgDescriptions = {};
+                    for (const asset of result.assets) {
+                        rgInventory[asset.assetid] = {
+                            id: asset.assetid,
+                            classid: asset.classid,
+                            instanceid: asset.instanceid || '0',
+                            pos: asset.position || 0,
+                        };
+                    }
+                    for (const desc of result.descriptions) {
+                        const key = `${desc.classid}_${desc.instanceid || '0'}`;
+                        rgDescriptions[key] = desc;
+                    }
+                    inventoryCache = { rgInventory, rgDescriptions };
+                    ES_log(`[fetchInventory] ${Object.keys(rgInventory).length} items recuperes via API officielle.`);
+                    return inventoryCache;
+                }
+                ES_log('[fetchInventory] API officielle: aucun asset retourne, fallback vers endpoint communautaire.');
+            } catch (err) {
+                ES_log(`[fetchInventory] API officielle echouee: ${err.message}. Fallback vers endpoint communautaire.`);
+            }
+        } else {
+            ES_log('[fetchInventory] STEAM_API_KEY configuree mais SteamID introuvable. Utilisation de l endpoint communautaire.');
+        }
+    } else {
+        ES_log('[fetchInventory] Pas de STEAM_API_KEY, utilisation de l endpoint communautaire.');
+    }
+
+    // --- Fallback: endpoint communautaire steamcommunity.com/inventory/json/753/6/ ---
     while (hasMore) {
         const url = `https://steamcommunity.com/${pl}/inventory/json/753/6/?start=${nextStart}`;
         const data = await httpGetJSON(url, { cookies: steamCookie(), extraHeaders: STEAM_AJAX_HEADERS });
@@ -382,21 +431,202 @@ export async function fetchSteamData(appid, profileLink = null, retries = 3) {
 /**
  * Synchronise l historique des trades Steam pour detecter les nouveaux echanges
  * Met a jour les lasttrade dans la base
+ *
+ * Strategie:
+ *   1. Si STEAM_API_KEY est configuree: utilise IEconService/GetTradeHistory (API officielle)
+ *      - Retourne du JSON structure (pas de HTML a parser)
+ *      - Rate limite par steamApi.js (1 req/s, 100 000/jour)
+ *   2. Sinon: fallback vers le scraping HTML de /inventoryhistory (methode historique)
+ *
+ * @param {string} profileLink - "my" ou SteamID64
+ * @returns {Promise<Array>} Tableau des appids dont lasttrade a ete modifie
  */
 export async function syncSteamInventoryHistory(profileLink = null) {
+    // --- Strategie 1: API officielle GetTradeHistory ---
+    if (hasSteamApiKey()) {
+        ES_log('[syncSteamInventoryHistory] Utilisation de l API officielle GetTradeHistory.');
+        try {
+            const result = await _syncTradeHistoryApi();
+            if (result) return result;
+            ES_log('[syncSteamInventoryHistory] API GetTradeHistory: aucun resultat, fallback vers le scraping HTML.');
+        } catch (e) {
+            ES_log(`[syncSteamInventoryHistory] API GetTradeHistory echouee: ${e.message}. Fallback vers le scraping HTML.`);
+        }
+    }
+
+    // --- Strategie 2: Fallback scraping HTML ---
+    return _syncTradeHistoryHtml(profileLink);
+}
+
+/**
+ * Synchronise l historique des trades via l API officielle GetTradeHistory.
+ * @returns {Promise<Array|null>} Tableau des appids mis a jour, ou null si erreur
+ */
+async function _syncTradeHistoryApi() {
+    const originalStopTimestamp = parseInt(getMeta('lasttrade', '0'), 10) || 0;
+    const stopTimestamp = originalStopTimestamp;
+    const updatedAppIds = new Set();
+
+    ES_log(`[_syncTradeHistoryApi] Point d arret: ${stopTimestamp} (${new Date(stopTimestamp).toLocaleString()})`);
+
+    let startAfterTime = null;
+    let startAfterTradeId = null;
+    let hasMore = true;
+    let pageCount = 0;
+    const MAX_PAGES = 50;
+
+    while (hasMore && pageCount < MAX_PAGES) {
+        const tradeParams = {
+            max_trades: 100,
+            get_descriptions: true,
+            include_failed: false,
+            include_total: false,
+            language: 'english',
+        };
+
+        // Ne pas envoyer start_after_time/tradeid sur la premiere page
+        if (startAfterTime !== null) {
+            tradeParams.start_after_time = startAfterTime;
+            tradeParams.start_after_tradeid = startAfterTradeId;
+            tradeParams.navigating_back = 0;
+        }
+
+        const result = await apiGetTradeHistory(tradeParams);
+
+        const response = result.response;
+        if (!response || !response.trades || response.trades.length === 0) {
+            ES_log('[_syncTradeHistoryApi] Fin de l historique (aucun trade).');
+            break;
+        }
+
+        // Construire un dictionnaire des descriptions (key: classid_instanceid)
+        const descMap = {};
+        if (response.descriptions) {
+            for (const desc of response.descriptions) {
+                const key = `${desc.classid}_${desc.instanceid || '0'}`;
+                descMap[key] = desc;
+            }
+        }
+
+        ES_log(`[_syncTradeHistoryApi] ${response.trades.length} trades sur la page ${pageCount + 1}.`);
+
+        let shouldStop = false;
+        let newTradeCount = 0;
+
+        for (const trade of response.trades) {
+            // Timestamp Unix en secondes -- plusieurs champs possibles selon la version API
+            const tsSec = trade.time_init ?? trade.time_trade_start ?? trade.time_updated ?? trade.time_created ?? 0;
+            const timestamp = tsSec * 1000;
+
+            if (stopTimestamp > 0 && timestamp <= stopTimestamp) {
+                ES_log(`[_syncTradeHistoryApi] ARRET: trade (ts=${timestamp} <= stop=${stopTimestamp}).`);
+                shouldStop = true;
+                break;
+            }
+
+            newTradeCount++;
+
+            // Parcourir les assets recus et donnes
+            const allAssets = [
+                ...(trade.assets_received || []),
+                ...(trade.assets_given || []),
+            ];
+
+            const rowAppIds = new Set();
+
+            for (const asset of allAssets) {
+                const key = `${asset.classid}_${asset.instanceid || '0'}`;
+                const desc = descMap[key];
+                if (!desc) continue;
+
+                const appid = `${desc.market_fee_app || asset.appid}`;
+                if (!appid || rowAppIds.has(appid) || isSteamEvent(appid)) continue;
+                rowAppIds.add(appid);
+
+                // Extraire le nom du jeu depuis les tags
+                let gameName = '';
+                const gameTag = (desc.tags || []).find(t => t.category === 'Game' || t.category_name === 'Jeu');
+                if (gameTag) {
+                    gameName = gameTag.name;
+                } else {
+                    gameName = (desc.type || '').replace(/^(carte a echanger de|trading card from)\s+/i, '').trim();
+                }
+
+                // Enregistre le badge appid si nouveau
+                upsertBadgeAppid(appid, gameName, false);
+
+                // Met a jour lasttrade
+                const existingGame = getGame(appid);
+                const prevLasttrade = existingGame?.lasttrade || 0;
+                if (!prevLasttrade || prevLasttrade < timestamp) {
+                    upsertGame(appid, {
+                        ...(existingGame || {}),
+                        appid: String(appid),
+                        gamename: gameName,
+                        lasttrade: timestamp,
+                    });
+                    updatedAppIds.add(String(appid));
+                    ES_log(`[_syncTradeHistoryApi] -> ${gameName} (${appid}) lasttrade mis a jour`);
+                }
+            }
+        }
+
+        ES_log(`[_syncTradeHistoryApi] ${newTradeCount} nouveau(x) trade(s) traite(s) sur cette page.`);
+
+        // Mettre a jour le curseur global (premiere page uniquement)
+        if (pageCount === 0 && response.trades.length > 0) {
+            const firstTrade = response.trades[0];
+            const firstTsSec = firstTrade.time_init ?? firstTrade.time_trade_start ?? firstTrade.time_updated ?? firstTrade.time_created ?? 0;
+            const latestTs = firstTsSec * 1000;
+            if (latestTs > 0) {
+                setMeta('lasttrade', String(latestTs));
+                ES_log(`[_syncTradeHistoryApi] Curseur lasttrade mis a jour: ${latestTs} (${new Date(latestTs).toLocaleString()})`);
+            }
+        }
+
+        if (shouldStop || !response.more) {
+            ES_log(`[_syncTradeHistoryApi] Synchronisation terminee. ${updatedAppIds.size} jeu(x) a re-scanner.`);
+            hasMore = false;
+            break;
+        }
+
+        // Pagination: utiliser le dernier trade comme point de depart
+        const lastTrade = response.trades[response.trades.length - 1];
+        const lastTsSec = lastTrade.time_init ?? lastTrade.time_trade_start ?? lastTrade.time_updated ?? lastTrade.time_created ?? 0;
+        const lastTradeId = lastTrade.tradeid || '';
+
+        // Garde-fou: si le curseur n a pas change, on arrete pour eviter une boucle infinie
+        if (startAfterTime !== null && startAfterTime === lastTsSec && startAfterTradeId === lastTradeId) {
+            ES_log('[_syncTradeHistoryApi] Curseur inchange - arret pour eviter une boucle infinie.');
+            break;
+        }
+
+        startAfterTime = lastTsSec;
+        startAfterTradeId = lastTradeId;
+        pageCount++;
+    }
+
+    return Array.from(updatedAppIds);
+}
+
+/**
+ * Synchronise l historique des trades via le scraping HTML (methode historique).
+ * @param {string} profileLink
+ * @returns {Promise<Array>}
+ */
+async function _syncTradeHistoryHtml(profileLink = null) {
     const pl = profileLink || profilePath();
     let startTime = null;
     const originalStopTimestamp = parseInt(getMeta('lasttrade', '0'), 10) || 0;
     let stopTimestamp = originalStopTimestamp;
-    const updatedAppIds = new Set(); // Appids dont lasttrade a ete modifie
+    const updatedAppIds = new Set();
 
-    ES_log(`[syncSteamInventoryHistory] Point d arret: ${stopTimestamp} (${new Date(stopTimestamp).toLocaleString()})`);
+    ES_log(`[_syncTradeHistoryHtml] Point d arret: ${stopTimestamp} (${new Date(stopTimestamp).toLocaleString()})`);
 
     let pageCount = 0;
-    const MAX_PAGES = 50; // Securite anti-ban
+    const MAX_PAGES = 50;
 
     while (pageCount < MAX_PAGES) {
-        // Inclure le sessionid dans l'URL pour la protection CSRF de Steam
         const sessionId = extractSessionIdFromCookies(steamCookie());
         const baseUrl = sessionId
             ? `https://steamcommunity.com/${pl}/inventoryhistory/?ajax=1&sessionid=${sessionId}`
@@ -413,37 +643,32 @@ export async function syncSteamInventoryHistory(profileLink = null) {
                 },
             });
 
-            // Detection: Steam renvoie du HTML si les cookies sont invalides
             if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
-                console.error('[syncSteamInventoryHistory] Steam a renvoyé du HTML au lieu du JSON.');
+                console.error('[_syncTradeHistoryHtml] Steam a renvoye du HTML au lieu du JSON.');
                 console.error('Cela signifie que les cookies Steam sont invalides ou expires.');
                 console.error('Supprimez data/steam_refresh_token.txt et relancez pour vous re-authentifier.');
-                // Debug: afficher le titre de la page pour identifier le probleme
                 const titleMatch = text.match(/<title>(.*?)<\/title>/i);
-                if (titleMatch) console.error(`[syncSteamInventoryHistory] Titre de la page: ${titleMatch[1]}`);
-                console.error(`[syncSteamInventoryHistory] URL: ${fetchUrl}`);
-                console.error(`[syncSteamInventoryHistory] Cookie (30 chars): ${(steamCookie() || '').substring(0, 30)}...`);
+                if (titleMatch) console.error(`[_syncTradeHistoryHtml] Titre de la page: ${titleMatch[1]}`);
                 break;
             }
 
             const data = JSON.parse(text);
 
             if (!data.success || !data.html) {
-                ES_log('[syncSteamInventoryHistory] Erreur ou fin de l historique.');
+                ES_log('[_syncTradeHistoryHtml] Erreur ou fin de l historique.');
                 break;
             }
 
             const $ = cheerio.load(data.html);
             const rows = $('.tradehistoryrow');
-
             const descriptions = (data.descriptions && data.descriptions['753']) ? data.descriptions['753'] : {};
 
             if (rows.length === 0) {
-                ES_log('[syncSteamInventoryHistory] Fin de l historique (aucune ligne).');
+                ES_log('[_syncTradeHistoryHtml] Fin de l historique (aucune ligne).');
                 break;
             }
 
-            ES_log(`[syncSteamInventoryHistory] ${rows.length} trades sur la page ${pageCount + 1}.`);
+            ES_log(`[_syncTradeHistoryHtml] ${rows.length} trades sur la page ${pageCount + 1}.`);
 
             let shouldStop = false;
             let newTradeCount = 0;
@@ -454,14 +679,13 @@ export async function syncSteamInventoryHistory(profileLink = null) {
                 const timestamp = parseSteamDateToMs(dateStr);
 
                 if (stopTimestamp > 0 && timestamp <= stopTimestamp) {
-                    ES_log(`[syncSteamInventoryHistory] ARRET: trade du ${dateStr} deja traite (ts=${timestamp} <= stop=${stopTimestamp}).`);
+                    ES_log(`[_syncTradeHistoryHtml] ARRET: trade du ${dateStr} deja traite (ts=${timestamp} <= stop=${stopTimestamp}).`);
                     shouldStop = true;
-                    return false; // break each
+                    return false;
                 }
 
-                // Trade nouveau: on le logue systematiquement
                 const eventDesc = ($row.find('.tradehistory_event_description').text() || '').replace(/\t|\n/g, ' ').trim();
-                ES_log(`[syncSteamInventoryHistory] Trade du ${dateStr}: ${eventDesc}`);
+                ES_log(`[_syncTradeHistoryHtml] Trade du ${dateStr}: ${eventDesc}`);
                 newTradeCount++;
 
                 const items = $row.find('.history_item');
@@ -476,22 +700,19 @@ export async function syncSteamInventoryHistory(profileLink = null) {
                     const itemData = descriptions[key];
                     if (itemData) {
                         const appid = `${itemData.market_fee_app}`;
-
                         let gameTag = (itemData.tags || []).find(t => t.category === 'Game' || t.category_name === 'Jeu');
                         let gameName = '';
                         if (gameTag) {
                             gameName = gameTag.name;
                         } else {
-                            gameName = (itemData.type || '').replace(/^(carte à échanger de|trading card from)\s+/i, '').trim();
+                            gameName = (itemData.type || '').replace(/^(carte a echanger de|trading card from)\s+/i, '').trim();
                         }
 
                         if (rowAppIds.has(appid) || isSteamEvent(appid, gameName)) return;
                         rowAppIds.add(appid);
 
-                        // Enregistre le badge appid si nouveau
                         upsertBadgeAppid(appid, gameName, false);
 
-                        // Met a jour lasttrade systematiquement pour les trades nouveaux
                         const existingGame = getGame(appid);
                         const prevLasttrade = existingGame?.lasttrade || 0;
                         if (!prevLasttrade || prevLasttrade < timestamp) {
@@ -502,15 +723,14 @@ export async function syncSteamInventoryHistory(profileLink = null) {
                                 lasttrade: timestamp,
                             });
                             updatedAppIds.add(String(appid));
-                            ES_log(`[syncSteamInventoryHistory] -> ${gameName} (${appid}) lasttrade mis a jour`);
+                            ES_log(`[_syncTradeHistoryHtml] -> ${gameName} (${appid}) lasttrade mis a jour`);
                         }
                     }
                 });
             });
 
-            ES_log(`[syncSteamInventoryHistory] ${newTradeCount} nouveau(x) trade(s) traite(s) sur cette page.`);
+            ES_log(`[_syncTradeHistoryHtml] ${newTradeCount} nouveau(x) trade(s) traite(s) sur cette page.`);
 
-            // Mise a jour du curseur global (premiere page uniquement)
             if (!startTime) {
                 const firstRow = $(rows[0]);
                 const latestDate = (firstRow.find('.tradehistory_date').text() || '').replace(/\t|\n/g, ' ').trim();
@@ -518,21 +738,21 @@ export async function syncSteamInventoryHistory(profileLink = null) {
                     const ts = parseSteamDateToMs(latestDate);
                     if (ts > 0) {
                         setMeta('lasttrade', String(ts));
-                        ES_log(`[syncSteamInventoryHistory] Curseur lasttrade mis a jour: ${ts} (${new Date(ts).toLocaleString()})`);
+                        ES_log(`[_syncTradeHistoryHtml] Curseur lasttrade mis a jour: ${ts} (${new Date(ts).toLocaleString()})`);
                     }
                 }
             }
 
             if (shouldStop || !data.cursor || !data.cursor.time) {
-                ES_log(`[syncSteamInventoryHistory] Synchronisation terminee. ${updatedAppIds.size} jeu(x) a re-scanner.`);
+                ES_log(`[_syncTradeHistoryHtml] Synchronisation terminee. ${updatedAppIds.size} jeu(x) a re-scanner.`);
                 break;
             }
 
             startTime = data.cursor.time;
             pageCount++;
-            await sleep(500); // Anti-rate-limit
+            await sleep(500);
         } catch (e) {
-            console.error('[syncSteamInventoryHistory] Erreur:', e);
+            console.error('[_syncTradeHistoryHtml] Erreur:', e);
             break;
         }
     }

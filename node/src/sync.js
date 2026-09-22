@@ -4,6 +4,7 @@ import { fetchSCEFresh, fetchSCEGlobalInfo, isSCEBusy, resetCreditFlag } from '.
 import { analyzeBadgeStatus } from './analyze.js';
 import { getAllBadgeAppids, getIncompleteBadgeAppids, getGame, purgeCache, getMeta, setMeta, isDBEmpty, countGames } from './db.js';
 import { getSteamCookies } from './auth.js';
+import { initSteamApiKey } from './steamApi.js';
 import { fetchMarketPricesV2, fetchSingleCardPrice } from './market.js';
 import { startMarketWorker, enqueueGameCards, enqueueStaleCards, getQueueStats, PRIORITY } from './marketQueue.js';
 
@@ -239,6 +240,13 @@ export async function mainWorkflow(profileLink = null) {
     // est appele pendant l'authentification (loginWithCredentials / getCookiesWithToken)
     const pl = profileLink || getSteamProfilePath();
     console.log(`[Workflow] Profile path: ${pl}`);
+
+    // Initialiser la cle API Steam Web API
+    // Si STEAM_API_KEY est dans .env, l'utilise directement.
+    // Sinon, tente de la récupérer automatiquement depuis steamcommunity.com/dev/apikey
+    // en utilisant les cookies Steam de l'utilisateur authentifié.
+    await initSteamApiKey();
+    console.log('');
 
     // Test: verifier que les cookies sont valides pour un endpoint authentifie
     // La page /badges est publique, donc on teste avec /inventoryhistory qui necessite une connexion

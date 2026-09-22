@@ -61,6 +61,15 @@ export function extractSessionIdFromCookies(cookieStr) {
 }
 
 /**
+ * Redacte la cle API dans une URL ou un message d erreur pour eviter toute fuite.
+ * @param {string} str - URL ou message contenant potentiellement key=...
+ * @returns {string}
+ */
+export function redactSensitiveUrl(str) {
+    return String(str).replace(/([?&]key=)[^&\s]+/gi, '$1***');
+}
+
+/**
  * Effectue une requete HTTP avec gestion des cookies et retries
  * Utilise redirect: 'follow' — les cookies sont envoyes via le header Cookie.
  * Pour eviter les problemes de cookies perdus sur redirect, le profil
@@ -97,16 +106,16 @@ export async function httpGet(url, { cookies = '', retries = 3, accept = 'text/h
                     await sleep(backoff);
                     continue;
                 }
-                throw new Error(`HTTP ${response.status} pour ${url}`);
+                throw new Error(`HTTP ${response.status} pour ${redactSensitiveUrl(url)}`);
             }
             const text = await response.text();
             // Debug: si la reponse est du HTML et qu'on attendait du JSON, log le debut
             if (accept.includes('application/json') && (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html'))) {
-                console.error(`[httpGet] HTML recu au lieu de JSON pour ${url}`);
+                console.error(`[httpGet] HTML recu au lieu de JSON pour ${redactSensitiveUrl(url)}`);
                 // Affiche TOUS les noms de cookies envoyes
                 const cookieNames = (cookies || '').split(';').map(c => c.split('=')[0].trim()).filter(Boolean);
                 console.error(`[httpGet] Cookies envoyes (${cookieNames.length}): ${cookieNames.join(', ')}`);
-                console.error(`[httpGet] Status: ${response.status}, URL finale: ${response.url}`);
+                console.error(`[httpGet] Status: ${response.status}, URL finale: ${redactSensitiveUrl(response.url)}`);
                 // Affiche le debut du HTML pour identifier la page (login, erreur, etc.)
                 const titleMatch = text.match(/<title>(.*?)<\/title>/i);
                 if (titleMatch) console.error(`[httpGet] Titre de la page: ${titleMatch[1]}`);

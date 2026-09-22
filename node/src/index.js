@@ -2,6 +2,7 @@ import { mainWorkflow, mainWorkflowGamecards, purgeAllCache, processQueue } from
 import { getAllBadgeAppids, getGame, isDBEmpty, countGames, getAllGames, getCards, getDB, getMeta } from './db.js';
 import { STEAM_PROFILE_PATH, setSteamCookie, getSteamCookie, getSteamProfilePath } from './utils.js';
 import { getSteamCookies } from './auth.js';
+import { initSteamApiKey } from './steamApi.js';
 import { fetchMarketPricesV2, fetchSingleCardPrice } from './market.js';
 import { startMarketWorker, enqueueGameCards, enqueueMarketRefresh, enqueueStaleCards, getQueueStats, getCardPriceCached, PRIORITY } from './marketQueue.js';
 
@@ -27,6 +28,8 @@ async function main() {
                 const cookies = await getSteamCookies(method);
                 setSteamCookie(cookies);
                 console.log('\nAuthentification reussie. Le refresh token est sauvegarde.');
+                // Tenter de récupérer la clé API automatiquement
+                await initSteamApiKey();
                 console.log('Vous pouvez maintenant lancer: npm run sync');
             }
             break;
@@ -40,6 +43,7 @@ async function main() {
                     const cookies = await getSteamCookies(process.env.STEAM_AUTH_METHOD || 'auto');
                     setSteamCookie(cookies);
                 }
+                await initSteamApiKey();
                 const { syncSteamInventoryHistory } = await import('./steam.js');
                 console.log('Synchronisation unique de l historique...');
                 await syncSteamInventoryHistory(getSteamProfilePath());
@@ -62,6 +66,7 @@ async function main() {
                     const cookies = await getSteamCookies(process.env.STEAM_AUTH_METHOD || 'auto');
                     setSteamCookie(cookies);
                 }
+                await initSteamApiKey();
 
                 await syncBadgesWorkflow(getSteamProfilePath());
                 console.log('Termine.');
@@ -80,6 +85,7 @@ async function main() {
                 const cookies = await getSteamCookies(process.env.STEAM_AUTH_METHOD || 'auto');
                 setSteamCookie(cookies);
             }
+            await initSteamApiKey();
             await mainWorkflowGamecards(appid, getSteamProfilePath());
             break;
         }
@@ -93,6 +99,7 @@ async function main() {
                     const cookies = await getSteamCookies(process.env.STEAM_AUTH_METHOD || 'auto');
                     setSteamCookie(cookies);
                 }
+                await initSteamApiKey();
                 await syncSteamInventoryHistory(getSteamProfilePath());
                 console.log('Historique synchronise.');
             }
@@ -110,6 +117,7 @@ async function main() {
                 const cookies = await getSteamCookies(process.env.STEAM_AUTH_METHOD || 'auto');
                 setSteamCookie(cookies);
             }
+            await initSteamApiKey();
             const badges = getAllBadgeAppids();
             const appids = badges.filter(b => !b.disabled).map(b => b.appid);
             console.log(`Scan de ${appids.length} badges...`);
@@ -128,6 +136,7 @@ async function main() {
                 const cookies = await getSteamCookies(process.env.STEAM_AUTH_METHOD || 'auto');
                 setSteamCookie(cookies);
             }
+            await initSteamApiKey();
             const pl = getSteamProfilePath();
 
             // Recupere tous les badges non-desactives
