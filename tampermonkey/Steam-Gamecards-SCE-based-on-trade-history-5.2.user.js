@@ -387,7 +387,7 @@ ES_log("[getPageAppids] Entrée fonction");
             }
 
             const clearDiv = titleEl.querySelector('div[style*="clear"]');
-            if (clearDiv) clearDiv.remove();
+            if (clearDiv && clearDiv.parentNode) clearDiv.parentNode.removeChild(clearDiv);
         });
 
         // --- 2. GESTION DU BOUTON (LISTE DU BAS) ---
