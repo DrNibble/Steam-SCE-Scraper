@@ -8,7 +8,12 @@ import { fetchMarketPricesV2, fetchSingleCardPrice } from './market.js';
 import { startMarketWorker, enqueueGameCards, enqueueStaleCards, getQueueStats, PRIORITY } from './marketQueue.js';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const POLL_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+// Intervalle du mode surveillance : scan de l historique des trades (tradehistory)
+const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+
+// Intervalle du scan complet des badges (toutes les pages, phases 1 + 2)
+// lance par le daemon `npm run sync` en mode surveillance
+const FULL_BADGE_SCAN_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 
 // Scan SCE: fetchSCEInventory s'execute en 4 taches paralleles si le waitTime
 // SCE (minutes) est < 1, sinon de facon sequentielle
@@ -214,8 +219,13 @@ export async function syncBadgesWorkflow(profileLink = null) {
  *
  * - Si la BD est vide : lance le scan complet (processQueue) pour remplir
  *   toutes les donnees (badges, cartes, SCE)
- * - Sinon : lance uniquement syncSteamInventoryHistory en boucle
- *   toutes les 10 minutes
+ * - Sinon, boucle de surveillance :
+ *   - toutes les 5 min (POLL_INTERVAL_MS) : scan tradehistory
+ *     (syncSteamInventoryHistory) + re-scan cible des jeux touches
+ *   - toutes les 15 min (FULL_BADGE_SCAN_INTERVAL_MS) : scan complet
+ *     des badges (toutes les pages, phases 1 + 2, comme sync:badges)
+ *   - phase 2 (fetchMarketPricesV2) : prix marché re-fetchés uniquement
+ *     si le dernier fetch de la carte date de plus de 24h
  *
  * @param {string} profileLink
  */
@@ -272,6 +282,11 @@ export async function mainWorkflow(profileLink = null) {
     const marketWorker = startMarketWorker();
     console.log('[Workflow] Worker de marché démarré.\n');
 
+    // Horloge du scan complet : 0 = scan complet des au premier cycle
+    // (DB deja remplie au demarrage) ; mis a Date.now() apres le scan
+    // initial (DB vide) pour ne pas le relancer tout de suite
+    let lastFullBadgeScanAt = 0;
+
     // --- CAS 1: BD VIDE -> SCAN COMPLET ---
     if (isDBEmpty()) {
         console.log('Base de donnees vide. Lancement du scan complet...');
@@ -303,12 +318,17 @@ export async function mainWorkflow(profileLink = null) {
         });
 
         console.log(`\nBase remplie avec ${countGames()} jeux. Passage en mode surveillance.`);
+        // Le scan complet vient d etre execute : le prochain part dans 15 min
+        lastFullBadgeScanAt = Date.now();
     } else {
         console.log(`Base deja remplie (${countGames()} jeux). Passage en mode surveillance.`);
     }
 
-    // --- CAS 2: BOUCLE DE SURVEILLANCE (toutes les 10 minutes) ---
-    console.log(`\n=== Mode surveillance (toutes les ${POLL_INTERVAL_MS / 1000 / 60} min) ===\n`);
+    // --- CAS 2: BOUCLE DE SURVEILLANCE ---
+    // - toutes les 5 min (POLL_INTERVAL_MS) : scan tradehistory + re-scan ciblé
+    // - toutes les 15 min (FULL_BADGE_SCAN_INTERVAL_MS) : scan complet des badges
+    //   (toutes les pages, phases 1 + 2, comme syncBadgesWorkflow)
+    console.log(`\n=== Mode surveillance (tradehistory toutes les ${POLL_INTERVAL_MS / 60000} min, scan complet toutes les ${FULL_BADGE_SCAN_INTERVAL_MS / 60000} min) ===\n`);
 
     let cycle = 0;
     while (true) {
@@ -326,13 +346,25 @@ export async function mainWorkflow(profileLink = null) {
                 console.log(`[Workflow] ${deferredAppIds.length} badge(s) differe(s) au cycle precedent (file SCE saturee). Nouvel essai...`);
             }
 
-            // Si des trades nouveaux ont ete detectes (ou des badges differes),
-            // re-scan des jeux concernes (délai réduit à 500ms)
-            const appIdsToRescan = [...new Set([...(updatedAppIds || []), ...deferredAppIds])];
-            if (appIdsToRescan.length > 0) {
-                console.log(`[Workflow] ${appIdsToRescan.length} jeu(x) a re-scanner. Re-scan...`);
-                await processQueue(appIdsToRescan, pl);
-                console.log(`[Workflow] Re-scan termine pour ${appIdsToRescan.length} jeu(x).`);
+            // Scan complet des badges toutes les 15 minutes : il couvre
+            // (via processQueue sur TOUS les appids) le re-scan des jeux
+            // touches par des trades, on skip donc le re-scan cible sur
+            // ces cycles-la.
+            const fullScanDue = Date.now() - lastFullBadgeScanAt >= FULL_BADGE_SCAN_INTERVAL_MS;
+            if (fullScanDue) {
+                console.log(`[Workflow] Scan complet des badges (toutes les ${FULL_BADGE_SCAN_INTERVAL_MS / 60000} min)...`);
+                await syncBadgesWorkflow(pl);
+                lastFullBadgeScanAt = Date.now();
+                console.log(`[Workflow] Scan complet termine.`);
+            } else {
+                // Si des trades nouveaux ont ete detectes (ou des badges differes),
+                // re-scan des jeux concernes (délai réduit à 500ms)
+                const appIdsToRescan = [...new Set([...(updatedAppIds || []), ...deferredAppIds])];
+                if (appIdsToRescan.length > 0) {
+                    console.log(`[Workflow] ${appIdsToRescan.length} jeu(x) a re-scanner. Re-scan...`);
+                    await processQueue(appIdsToRescan, pl);
+                    console.log(`[Workflow] Re-scan termine pour ${appIdsToRescan.length} jeu(x).`);
+                }
             }
             
             // Enfiler les cartes stale pour le worker de fond (stale-while-revalidate)

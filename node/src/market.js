@@ -406,6 +406,22 @@ export async function resolveCardPrice(card, days = 7) {
 // 4) Fonction principale : fetch tous les prix pour un appid
 // ═══════════════════════════════════════════════════════════════
 
+// Délai minimum entre deux fetchs de prix marché pour une même carte.
+// fetchMarketPricesV2 ne re-fetch une carte que si son dernier fetch
+// (cards.steam_market_fetched_at, en ms) date de plus de 24 heures.
+export const MARKET_PRICE_REFRESH_MS = 24 * 60 * 60 * 1000; // 24 heures
+
+/**
+ * Une carte est "fraîche" si son prix marché a été récupéré il y a moins de
+ * MARKET_PRICE_REFRESH_MS (24h). Les cartes fraîches sont ignorées par
+ * fetchMarketPricesV2 ; la même limite est aussi appliquée au worker
+ * marketQueue (garde-fou dans processCard / dequeue).
+ */
+export function isMarketPriceFresh(card) {
+    const fetchedAt = Number(card?.steam_market_fetched_at ?? 0);
+    return fetchedAt > 0 && Date.now() - fetchedAt < MARKET_PRICE_REFRESH_MS;
+}
+
 /**
  * Récupère les prix du marché Steam pour toutes les cartes d'un jeu.
  *
@@ -413,6 +429,7 @@ export async function resolveCardPrice(card, days = 7) {
  *   1. Pour chaque carte, vérifier pricehistory (ventes des 7 derniers jours)
  *   2. Si vente → utiliser le dernier prix de vente (EUR)
  *   3. Sinon → utiliser le buy order le plus haut (orderbook)
+ *   4. Les cartes dont le prix a été fetché il y a moins de 24h sont ignorées
  *
  * Remplace fetchSteamMarketPrices de steam.js par une version plus précise.
  *
@@ -429,9 +446,16 @@ export async function fetchMarketPricesV2(appid, delayMs = 500) {
     ES_log(`[fetchMarketPricesV2] Traitement de ${cards.length} cartes (appid ${appid})...`);
 
     const priceMap = new Map();
+    let skippedFresh = 0;
 
     for (const card of cards) {
         if (!card.hash) continue;
+
+        // Prix marché déjà récupéré il y a moins de 24h : pas de re-fetch
+        if (isMarketPriceFresh(card)) {
+            skippedFresh++;
+            continue;
+        }
 
         ES_log(`[fetchMarketPricesV2] Carte: ${card.name || card.hash}`);
 
@@ -455,10 +479,16 @@ export async function fetchMarketPricesV2(appid, delayMs = 500) {
         await sleep(delayMs);
     }
 
+    // Rien à mettre à jour : toutes les cartes étaient fraîches (< 24h)
+    if (priceMap.size === 0) {
+        ES_log(`[fetchMarketPricesV2] Appid ${appid}: ${skippedFresh}/${cards.length} cartes fraîches (< 24h), aucune mise à jour.`);
+        return priceMap;
+    }
+
     // Mettre à jour la DB en une seule transaction
     updateCardMarketPrices(appid, priceMap);
 
-    ES_log(`[fetchMarketPricesV2] Terminé pour appid ${appid} (${priceMap.size} cartes mises à jour).`);
+    ES_log(`[fetchMarketPricesV2] Terminé pour appid ${appid} (${priceMap.size} cartes mises à jour, ${skippedFresh} ignorées < 24h).`);
 
     return priceMap;
 }

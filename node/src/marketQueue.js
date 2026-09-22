@@ -39,7 +39,7 @@
 
 import { getDB } from './db.js';
 import { sleep, ES_log } from './utils.js';
-import { getOrderbook, getRecentSale, getPriceOverview } from './market.js';
+import { getOrderbook, getRecentSale, getPriceOverview, MARKET_PRICE_REFRESH_MS } from './market.js';
 
 // ═══════════════════════════════════════════════════════════════
 // Configuration du token bucket
@@ -55,9 +55,10 @@ const CONFIG = {
     COOLDOWN_REFILL_MS: 5000,   // pendant cooldown : 1 req / 5s
     RECOVERY_MS: 60000,         // 60s en mode récupération après cooldown
 
-    // Stale-while-revalidate
+    // Stale-while-revalidate (aligné sur la limite globale 24h :
+    // un prix marché n'est jamais re-fetché avant 24h, worker inclus)
     FRESH_MS: 5 * 60 * 1000,    // 5 min : prix "frais"
-    STALE_MS: 30 * 60 * 1000,   // 30 min : prix "stale" mais utilisable
+    STALE_MS: MARKET_PRICE_REFRESH_MS, // 24h : prix "stale" -> refresh uniquement si > 24h
 
     // Queue
     MAX_RETRIES: 3,
@@ -267,7 +268,8 @@ export function enqueueGameCards(appid, priority = PRIORITY.TRADE_RECENT) {
  * Enqueue les cartes dont le prix est stale (stale-while-revalidate).
  * À appeler périodiquement pour rafraîchir le cache.
  *
- * @param {number} staleAfterMs - âge max avant refresh (défaut 30 min)
+ * @param {number} staleAfterMs - âge max avant refresh (défaut 24h, aligné
+ *                                sur MARKET_PRICE_REFRESH_MS)
  */
 export function enqueueStaleCards(staleAfterMs = CONFIG.STALE_MS) {
     ensureQueueTable();
@@ -306,22 +308,52 @@ function dequeueNext() {
 
 
 // ═══════════════════════════════════════════════════════════════
-// Traitement d'une carte
+// Garde-fou 24h (limite globale de fetch des prix marché)
 // ═══════════════════════════════════════════════════════════════
+
+/**
+ * Garde-fou 24h partagé : une carte dont le prix marché a été récupéré il
+ * y a moins de MARKET_PRICE_REFRESH_MS (24h) ne doit déclencher AUCUNE
+ * requête marché (limite globale : worker marketQueue ET fetchMarketPricesV2).
+ */
+function isQueueItemFresh(item) {
+    const db = getDB();
+    const row = db.prepare('SELECT steam_market_fetched_at FROM cards WHERE appid = ? AND hash = ?')
+        .get(String(item.appid), item.hash);
+    const fetchedAt = Number(row?.steam_market_fetched_at ?? 0);
+    return fetchedAt > 0 && Date.now() - fetchedAt < MARKET_PRICE_REFRESH_MS;
+}
+
+/** Marque un item de queue comme done sans aucune requête réseau. */
+function markQueueItemDoneFresh(item) {
+    const db = getDB();
+    db.prepare('UPDATE market_queue SET status = ?, processed_at = ? WHERE id = ?')
+        .run('done', Date.now(), item.id);
+}
 
 /**
  * Traite une carte : récupère le prix depuis Steam et met à jour la DB.
  *
  * Stratégie pour minimiser les requêtes :
- *   1. pricehistory (1 req) → si vente dans 7j → prix de vente (pas besoin d'orderbook)
- *   2. Si pas de vente → orderbook (1 req) → buy order le plus haut
- *   3. Si pricehistory échoue (cookies invalides) → orderbook seulement
+ *   1. priceoverview (1 req, sans auth) → prix de vente EUR
+ *   2. orderbook (1 req, sans auth) → buy order le plus haut
+ *   3. pricehistory (1 req, auth) → volume 7j + dernier prix de vente
  *
- * Donc : 1 req par carte en moyenne (pricehistory suffit si vente récente),
- *        2 req max si pas de vente.
+ * Garde-fou 24h : une carte déjà fetchée il y a moins de 24h est marquée
+ * done sans aucune requête (voir isQueueItemFresh).
  */
 async function processCard(item) {
     const db = getDB();
+
+    // Garde-fou 24h (limite globale) : prix marché déjà récupéré il y a
+    // moins de 24h -> pas de re-fetch, la carte est marquée done. Le
+    // worker saute déjà ces cartes AVANT le token bucket ; ce garde reste
+    // en défense pour tout appel direct de processCard.
+    if (isQueueItemFresh(item)) {
+        ES_log(`[processCard] ${item.hash}: prix frais (< 24h), fetch marché ignoré`);
+        markQueueItemDoneFresh(item);
+        return { success: true, skippedFresh: true };
+    }
 
     // Marquer comme processing
     db.prepare('UPDATE market_queue SET status = ?, attempts = attempts + 1 WHERE id = ?')
@@ -457,6 +489,13 @@ export function startMarketWorker(options = {}) {
                 if (!next) {
                     // Queue vide : attendre
                     await sleep(CONFIG.POLL_INTERVAL_MS);
+                    continue;
+                }
+
+                // Carte fraîche (< 24h) : skip SANS consommer de token
+                // (limite globale : aucun fetch marché avant 24h)
+                if (isQueueItemFresh(next)) {
+                    markQueueItemDoneFresh(next);
                     continue;
                 }
 
