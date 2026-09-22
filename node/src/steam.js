@@ -116,8 +116,9 @@ export const STEAM_CACHE_TTL = {
     STEAM_DATA_MS: 30 * 60 * 1000,         // 30 minutes
     // Re-check du statut badge_crafted = 0 (badge pas encore genere).
     // Un badge_crafted = 1 n est pas re-checke par les scans automatiques
-    // (un badge crafte ne disparait pas) ; les rescans forces post-trade
-    // et les commandes manuelles le re-checkent quand meme (force: true).
+    // (un badge crafte ne disparait pas) SAUF si refetchCrafted = true
+    // (option passee par le daemon npm run sync) ; les rescans forces
+    // post-trade et les commandes manuelles le re-checkent quand meme (force: true).
     BADGE_CRAFTED_FALSE_MS: 30 * 60 * 1000, // 30 minutes
     // Inventaire 753_6 (fillInventoryData) : partage par toutes les taches
     // d un meme cycle + invalide des qu un nouveau trade est detecte
@@ -340,29 +341,32 @@ const BADGE_PROFILE_PATH = process.env.BADGE_PROFILE_PATH || 'id/Dr_Nibble';
  * - Badge non crafte : la page contient "badge_empty_circle" (ex: "Niveau 0 - X cartes collectees sur Y")
  *
  * Cache anti rate-limit (DB, colonnes badge_crafted / badge_crafted_fetched_at) :
- * - badge_crafted = 1 : pas re-checke par les scans automatiques (un badge
- *   crafte ne disparait pas), mais re-checke si force (rescan post-trade,
- *   commandes manuelles)
+ * - badge_crafted = 1 : pas re-checke par les scans automatiques SAUF si
+ *   refetchCrafted = true (option passee par le daemon npm run sync pour
+ *   re-verifier periodicement les badges deja craftes) ; re-checke si force
+ *   (rescan post-trade, commandes manuelles)
  * - badge_crafted = 0 verifie il y a moins de BADGE_CRAFTED_FALSE_MS : skip
  * - NULL (jamais verifie) ou resultat indetermine : pas de cache
  * - { force: true } bypass ces regles
+ * - { refetchCrafted: true } bypass uniquement le skip de badge_crafted = 1
  * Le resultat (true/false) est ecrit en DB par setGameBadgeCrafted.
  *
  * @param {string} appid
  * @param {string|null} profileLink - optionnel: autre profil a verifier (defaut: compte principal)
- * @param {Object} options - { force: true } pour bypasser le cache
+ * @param {Object} options - { force: true } pour bypasser le cache,
+ *   { refetchCrafted: true } pour re-fetcher meme si badge_crafted = 1
  * @returns {Promise<boolean|null>} true = deja genere, false = pas encore, null = indetermine (erreur)
  */
 export async function fetchBadgeCrafted(appid, profileLink = null, options = {}) {
     const pl = profileLink || BADGE_PROFILE_PATH;
     if (isSteamEvent(appid)) return null;
-    const { force = false } = options;
+    const { force = false, refetchCrafted = false } = options;
 
     // Cache DB : evite de re-fetch la page gamecards a chaque scan complet
     const existing = getGame(appid);
     const crafted = existing?.badge_crafted ?? null;
     if (!force) {
-        if (crafted === 1) {
+        if (crafted === 1 && !refetchCrafted) {
             ES_log(`[fetchBadgeCrafted] ${appid}: badge crafte (cache DB), pas de re-check.`);
             return true;
         }
@@ -410,12 +414,13 @@ export async function fetchBadgeCrafted(appid, profileLink = null, options = {})
  * @param {string} appid
  * @param {string} profileLink
  * @param {Object} options - { force: true } pour bypasser le cache TTL,
- *   { retries: 3 } nombre de tentatives
+ *   { retries: 3 } nombre de tentatives,
+ *   { refetchCrafted: true } pour re-fetcher le statut badge_crafted = 1
  */
 export async function fetchSteamData(appid, profileLink = null, options = {}) {
     const pl = profileLink || profilePath();
     if (isSteamEvent(appid)) return null;
-    const { force = false, retries = 3 } = options;
+    const { force = false, retries = 3, refetchCrafted = false } = options;
 
     // Cache TTL : donnees Steam deja recuperees recemment -> reutilisation DB
     // fetchBadgeCrafted garde son propre cache DB (badge_crafted), on le
@@ -426,7 +431,7 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
             && Date.now() - existingGame.fetched_at < STEAM_CACHE_TTL.STEAM_DATA_MS
             && (getCards(appid) || []).length > 0) {
             ES_log(`[fetchSteamData] ${appid}: donnees Steam fraiches (< ${STEAM_CACHE_TTL.STEAM_DATA_MS / 60000} min), reutilisees sans requete.`);
-            await fetchBadgeCrafted(appid);
+            await fetchBadgeCrafted(appid, null, { force, refetchCrafted });
             return { ...existingGame, cards: getCards(appid) };
         }
     }
@@ -482,13 +487,13 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
         // Badge deja genere par le COMPTE PRINCIPAL ? (best-effort : on garde la valeur existante si indetermine)
         // fetchBadgeCrafted ecrit lui-meme le resultat en DB (cache badge_crafted)
         // et herite du mode force de fetchSteamData
-        await fetchBadgeCrafted(appid, null, { force });
+        await fetchBadgeCrafted(appid, null, { force, refetchCrafted });
 
         return { ...gameData, cards };
     } catch (error) {
         if (retries > 0) {
             await sleep(3000);
-            return await fetchSteamData(appid, profileLink, { force, retries: retries - 1 });
+            return await fetchSteamData(appid, profileLink, { force, retries: retries - 1, refetchCrafted });
         }
         return null;
     }

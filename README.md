@@ -151,7 +151,7 @@ Tous les appels vers steamcommunity.com sont mis en cache (constantes `STEAM_CAC
 |----------|-------|-----|
 | Pages `/badges?p=N` (liste d appids, `getAllPagesAppids`) | memoire, par profil | 1h |
 | `ajaxgetbadgeinfo` (cartes du set, `fetchSteamData`) | DB (`games.fetched_at`) | 30 min |
-| Page `gamecards` (`fetchBadgeCrafted`, statut badge crafte) | DB (`badge_crafted` + `badge_crafted_fetched_at`) | `= 1` : skippe par les scans automatiques, re-checke via force (trade / commandes manuelles) ; `= 0` : 30 min ; NULL : check systematique |
+| Page `gamecards` (`fetchBadgeCrafted`, statut badge crafte) | DB (`badge_crafted` + `badge_crafted_fetched_at`) | `= 1` : skip par defaut, mais re-checke par le daemon `npm run sync` via `refetchCrafted` ou par `force` (trade / commandes manuelles) ; `= 0` : 30 min ; NULL : check systematique |
 | Inventaire `753_6` (`fetchInventory`) | memoire, partage entre taches du cycle (singleflight) | 5 min |
 | Prix marche (priceoverview, orderbook, pricehistory) | DB (`cards.steam_market_fetched_at`) | 24h (voir [Limite 24h](#limite-24h-des-prix-marche)) |
 | `inventoryhistory` (`syncSteamInventoryHistory`) | aucun | - |
