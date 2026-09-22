@@ -219,7 +219,8 @@ export function getGamesWithCards() {
 /**
  * Met a jour le statut "badge deja genere" d un jeu + la date du check
  * (badge_crafted_fetched_at sert de cache anti rate-limit pour
- * fetchBadgeCrafted : un badge_crafted = 1 n est jamais re-checke)
+ * fetchBadgeCrafted : un badge_crafted = 1 n est pas re-checke par les
+ * scans automatiques, seulement via force)
  * @param {string} appid
  * @param {boolean} crafted - true si le badge a ete crafte par le profil
  */

@@ -115,8 +115,9 @@ export const STEAM_CACHE_TTL = {
     // scans complets et les rescans forces apres trade
     STEAM_DATA_MS: 30 * 60 * 1000,         // 30 minutes
     // Re-check du statut badge_crafted = 0 (badge pas encore genere).
-    // Un badge_crafted = 1 n est JAMAIS re-checke (un badge crafte
-    // ne disparait pas).
+    // Un badge_crafted = 1 n est pas re-checke par les scans automatiques
+    // (un badge crafte ne disparait pas) ; les rescans forces post-trade
+    // et les commandes manuelles le re-checkent quand meme (force: true).
     BADGE_CRAFTED_FALSE_MS: 30 * 60 * 1000, // 30 minutes
     // Inventaire 753_6 (fillInventoryData) : partage par toutes les taches
     // d un meme cycle + invalide des qu un nouveau trade est detecte
@@ -339,10 +340,12 @@ const BADGE_PROFILE_PATH = process.env.BADGE_PROFILE_PATH || 'id/Dr_Nibble';
  * - Badge non crafte : la page contient "badge_empty_circle" (ex: "Niveau 0 - X cartes collectees sur Y")
  *
  * Cache anti rate-limit (DB, colonnes badge_crafted / badge_crafted_fetched_at) :
- * - badge_crafted = 1 : JAMAIS re-checke (un badge crafte ne disparait pas)
+ * - badge_crafted = 1 : pas re-checke par les scans automatiques (un badge
+ *   crafte ne disparait pas), mais re-checke si force (rescan post-trade,
+ *   commandes manuelles)
  * - badge_crafted = 0 verifie il y a moins de BADGE_CRAFTED_FALSE_MS : skip
  * - NULL (jamais verifie) ou resultat indetermine : pas de cache
- * - { force: true } bypass ces regles (commandes manuelles)
+ * - { force: true } bypass ces regles
  * Le resultat (true/false) est ecrit en DB par setGameBadgeCrafted.
  *
  * @param {string} appid
