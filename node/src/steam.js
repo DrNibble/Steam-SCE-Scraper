@@ -1,7 +1,7 @@
 import * as cheerio from 'cheerio';
 import { httpGet, httpGetJSON, clean, isSteamEvent, sleep, parseSteamDateToMs, getSteamCookie, getSteamProfilePath, extractSessionIdFromCookies, extractSteamIdFromCookies, INVENTORY_PAGE_DELAY, ES_log } from './utils.js';
 import { upsertBadgeAppid, upsertGame, upsertCards, getMeta, setMeta, getGame, getBadgeAppid, getCards, updateCardMarketPrices, setGameBadgeCrafted } from './db.js';
-import { hasSteamApiKey, getInventory as apiGetInventory, getTradeHistory as apiGetTradeHistory, getCurrentSteamId } from './steamApi.js';
+import { hasSteamApiKey, hasPublisherApiKey, getInventory as apiGetInventory, getTradeHistory as apiGetTradeHistory, getCurrentSteamId } from './steamApi.js';
 
 // Cookie Steam dynamique (recupere via auth.js ou .env)
 function steamCookie() { return getSteamCookie(); }
@@ -192,10 +192,13 @@ async function _fetchInventory(pl) {
     ES_log('[fetchInventory] Debut de la recuperation complete...');
 
     // --- Tentative via API officielle (IInventoryService/GetInventory) ---
-    if (hasSteamApiKey()) {
+    // GetInventory nécessite une clé publisher (Economy permissions).
+    // Une clé utilisateur standard (steamcommunity.com/dev/apikey) retourne 403 Forbidden.
+    // On ne tente l'API officielle que si une clé publisher est configurée.
+    if (hasPublisherApiKey()) {
         const steamId = getCurrentSteamId() || (pl.startsWith('profiles/') ? pl.replace('profiles/', '') : null);
         if (steamId) {
-            ES_log(`[fetchInventory] Tentative via API officielle (steamid=${steamId})...`);
+            ES_log(`[fetchInventory] Tentative via API officielle (steamid=${steamId}, clé publisher)...`);
             try {
                 const result = await apiGetInventory(steamId, 753, { contextid: 6, fallbackToCommunity: false });
                 if (result && result.assets && result.assets.length > 0) {

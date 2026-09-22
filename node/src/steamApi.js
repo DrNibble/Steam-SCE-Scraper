@@ -31,9 +31,15 @@ import * as cheerio from 'cheerio';
 // Configuration
 // ═══════════════════════════════════════════════════════════════
 
-// Clé API: variable d environnement ou fetch automatique depuis steamcommunity.com/dev/apikey
+// Clé API utilisateur: variable d environnement ou fetch automatique depuis steamcommunity.com/dev/apikey
+// Fonctionne pour: IEconService/GetTradeHistory, GetTradeOffers, ISteamUser, ISteamEconomy/GetAssetClassInfo
 let _steamApiKey = process.env.STEAM_API_KEY || '';
 let _apiKeyFetched = false;
+
+// Clé API publisher: variable d environnement uniquement (jamais auto-fetchée)
+// Nécessaire pour: IInventoryService/GetInventory, ISteamEconomy/GetAssetPrices
+// Doit être créée depuis Steamworks partner (partner.steamgames.com)
+let _steamPublisherApiKey = process.env.STEAM_PUBLISHER_API_KEY || '';
 
 const STEAM_API_BASE = 'https://api.steampowered.com';
 const STEAM_PARTNER_API_BASE = 'https://partner.steam-api.com';
@@ -138,6 +144,24 @@ export async function fetchApiKeyFromSteam() {
  */
 function getSteamApiKey() {
     return _steamApiKey || null;
+}
+
+/**
+ * Retourne la clé API publisher Steamworks si configurée.
+ * Cette clé ne peut PAS être récupérée via /dev/apikey — elle doit être
+ * créée depuis Steamworks partner (partner.steamgames.com).
+ * @returns {string|null}
+ */
+function getPublisherApiKey() {
+    return _steamPublisherApiKey || null;
+}
+
+/**
+ * Vérifie si une clé publisher est configurée.
+ * @returns {boolean}
+ */
+export function hasPublisherApiKey() {
+    return !!getPublisherApiKey();
 }
 
 /**
@@ -300,16 +324,22 @@ export function hasSteamApiKey() {
  * @param {string} methodName - Ex: "GetTradeHistory", "GetAssetPrices", "GetInventory"
  * @param {string|number} version - Ex: 1 ou "v1"
  * @param {object} params - Paramètres supplémentaires de la requête
- * @param {object} options - Options: { usePartnerBase?: boolean, retries?: number }
+ * @param {object} options - Options: { usePartnerBase?: boolean, usePublisherKey?: boolean, retries?: number }
  * @returns {Promise<object>} La réponse JSON parsée
  */
 export async function steamApiFetch(interfaceName, methodName, version = 1, params = {}, options = {}) {
-    const apiKey = getSteamApiKey();
+    // Sélectionner la clé appropriée: publisher ou user
+    const apiKey = options.usePublisherKey
+        ? (getPublisherApiKey() || getSteamApiKey())
+        : getSteamApiKey();
+
     if (!apiKey) {
+        const keyType = options.usePublisherKey ? 'publisher' : 'utilisateur';
         throw new Error(
-            `[SteamApi] Aucune cle API Steam disponible. ` +
-            `Definissez STEAM_API_KEY dans .env ou assurez-vous d etre authentifie ` +
-            `(la cle sera recuperee automatiquement depuis https://steamcommunity.com/dev/apikey)`
+            `[SteamApi] Aucune cle API ${keyType} disponible. ` +
+            (options.usePublisherKey
+                ? `Definissez STEAM_PUBLISHER_API_KEY dans .env (cle Steamworks partner). `
+                : `Definissez STEAM_API_KEY dans .env ou assurez-vous d etre authentifie. `)
         );
     }
 
@@ -416,18 +446,31 @@ export async function getTradeHistory(options = {}) {
  * Endpoint officiel: GET https://api.steampowered.com/ISteamEconomy/GetAssetPrices/v1/
  * Documentation: https://partner.steamgames.com/doc/webapi/isteameconomy
  *
- * Note: L'appid doit être une "steam economy app" (ex: 440 pour TF2, 570 pour Dota 2).
- * Pour les cartes Steam Community (appid 753), cet endpoint peut ne pas retourner
- * de données utiles car 753 n'est pas une steam economy app traditionnelle.
- * Dans ce cas, le projet utilise déjà les endpoints communautaires (priceoverview, etc.).
+ * ATTENTION: Bien que la documentation Steamworks indique "user authentication key",
+ * cet endpoint nécessite en pratique une clé publisher associée à l'appid.
+ * Une clé utilisateur standard (steamcommunity.com/dev/apikey) retourne 403 Forbidden.
+ * Ce comportement est confirmé par des tests avec les appid 440 (TF2) et 570 (Dota 2).
+ *
+ * Pour les cartes Steam Community (appid 753), cet endpoint n'est pas applicable
+ * car 753 n'est pas une steam economy app traditionnelle. Les endpoints communautaires
+ * (priceoverview, pricehistory, orderbook) restent le seul moyen d'obtenir les prix.
  *
  * @param {number} appid - L'ID de l'application (doit être une steam economy app)
  * @param {object} [options]
  * @param {string} [options.currency] - Code devise (ex: "EUR")
  * @param {string} [options.language] - Langue (ex: "english")
- * @returns {Promise<object>} - { result: { success, assets, prices? } }
+ * @returns {Promise<object|null>} - Réponse de l'API ou null si pas de clé publisher
  */
 export async function getAssetPrices(appid, options = {}) {
+    // GetAssetPrices nécessite une clé publisher associée à l'appid.
+ // Une clé utilisateur standard retourne 403 Forbidden.
+ if (!hasPublisherApiKey()) {
+        ES_log(`[SteamApi] getAssetPrices(appid=${appid}): clé publisher non configurée. ` +
+            `Définissez STEAM_PUBLISHER_API_KEY dans .env pour utiliser cet endpoint. ` +
+            `Une clé utilisateur standard (steamcommunity.com/dev/apikey) ne fonctionne pas.`);
+        return null;
+    }
+
     const params = {
         appid: appid,
         currency: options.currency,
@@ -436,7 +479,10 @@ export async function getAssetPrices(appid, options = {}) {
 
     ES_log(`[SteamApi] getAssetPrices(appid=${appid})`);
 
-    return steamApiFetch('ISteamEconomy', 'GetAssetPrices', 1, params);
+    return steamApiFetch('ISteamEconomy', 'GetAssetPrices', 1, params, {
+        usePublisherKey: true,
+        retries: 0, // 403 ne se résout pas en retry
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -464,18 +510,31 @@ export async function getInventory(steamid, appid, options = {}) {
     const fallbackToCommunity = options.fallbackToCommunity !== false;
     const contextid = options.contextid ?? 6; // 6 = Steam Community items par défaut
 
-    // Essayer l'API officielle d'abord
+    // GetInventory nécessite une clé publisher (Economy permissions).
+    // Une clé utilisateur standard retourne 403 Forbidden — inutile d'essayer.
+    if (!hasPublisherApiKey()) {
+        ES_log(`[SteamApi] getInventory: clé publisher non configurée. ` +
+            `Utilisation directe de l'endpoint communautaire. ` +
+            `(Une clé utilisateur standard de /dev/apikey retourne 403 pour cet endpoint.)`);
+        if (fallbackToCommunity) {
+            return getInventoryCommunity(steamid, appid, contextid);
+        }
+        return null;
+    }
+
+    // Clé publisher disponible: essayer l'API officielle
     try {
         const params = {
             appid: appid,
             steamid: steamid,
         };
 
-        ES_log(`[SteamApi] getInventory(steamid=${steamid}, appid=${appid})`);
+        ES_log(`[SteamApi] getInventory(steamid=${steamid}, appid=${appid}) via API officielle (clé publisher)`);
 
         const result = await steamApiFetch('IInventoryService', 'GetInventory', 1, params, {
             usePartnerBase: true,
-            retries: 1, // Moins de retries pour le fallback rapide
+            usePublisherKey: true,
+            retries: 0, // 403 ne se résout pas en retry
         });
 
         if (result && result.response && result.response.assets) {

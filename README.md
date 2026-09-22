@@ -51,16 +51,16 @@ Editez le fichier `.env` et renseignez vos parametres :
 
 #### Clé API Steam Web API
 
-- **STEAM_API_KEY** : Clé API Steam obtenue sur [https://steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey)
+- **STEAM_API_KEY** : Clé API Steam utilisateur obtenue sur [https://steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey)
   - **Option 1 — Manuel** : définissez `STEAM_API_KEY` dans `.env` avec votre clé
   - **Option 2 — Automatique (recommandé)** : laissez `STEAM_API_KEY` vide dans `.env`. Après authentification Steam (login ou daemon), le projet récupère automatiquement votre clé API depuis la page [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey) en utilisant vos cookies de session. Aucune action manuelle nécessaire.
-  - Cette clé permet d'utiliser les endpoints officiels de la Steam Web API :
-    - **GetTradeHistory** (`IEconService/GetTradeHistory/v1`) : historique des trades en JSON structuré
-    - **GetAssetPrices** (`ISteamEconomy/GetAssetPrices/v1`) : prix des assets d'une app economy
-    - **GetInventory** (`IInventoryService/GetInventory/v1`) : inventaire d'un utilisateur
-  - GetTradeHistory et GetAssetPrices fonctionnent avec la clé utilisateur
-  - GetInventory nécessite une clé **publisher** Steamworks (Economy permissions) ; en cas d'échec (clé utilisateur), le système fait un fallback automatique vers l'endpoint communautaire
+  - Cette clé fonctionne pour les endpoints IEconService (GetTradeHistory, GetTradeOffers) et ISteamUser (GetPlayerSummaries)
   - Si aucune clé n'est disponible (ni `.env`, ni fetch automatique), le projet utilise les méthodes historiques (scraping HTML, endpoints communautaires)
+
+- **STEAM_PUBLISHER_API_KEY** : Clé API Publisher Steamworks ([documentation](https://partner.steamgames.com/doc/webapi_overview/auth))
+  - Optionnel — uniquement nécessaire pour `IInventoryService/GetInventory` et `ISteamEconomy/GetAssetPrices`
+  - Ne peut PAS être récupérée via `/dev/apikey` — doit être créée depuis Steamworks partner
+  - Non requise pour le fonctionnement normal du projet (les endpoints communautaires sont utilisés par défaut)
 
 #### Cookies de session
 
@@ -84,11 +84,22 @@ Le projet supporte les endpoints officiels de la Steam Web API via le module `st
 
 ### Endpoints implantes
 
-| Endpoint | Interface | URL | Cl requise | Description |
+| Endpoint | Interface | URL | Cle requise | Description |
 |----------|-----------|-----|------------|-------------|
 | GetTradeHistory | IEconService | `https://api.steampowered.com/IEconService/GetTradeHistory/v1/` | Utilisateur | Historique des trades en JSON structure |
-| GetAssetPrices | ISteamEconomy | `https://api.steampowered.com/ISteamEconomy/GetAssetPrices/v1/` | Utilisateur | Prix des assets d une app economy |
+| GetAssetPrices | ISteamEconomy | `https://api.steampowered.com/ISteamEconomy/GetAssetPrices/v1/` | Publisher (associee a l appid) | Prix des assets d une app economy |
 | GetInventory | IInventoryService | `https://partner.steam-api.com/IInventoryService/GetInventory/v1/` | Publisher (Economy) | Inventaire d un utilisateur |
+
+### Types de cles API
+
+Le projet utilise deux types de cles API distincts:
+
+| Cle | Source | Endpoints supportes | Auto-recuperee |
+|-----|--------|---------------------|----------------|
+| **Utilisateur** (`STEAM_API_KEY`) | [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey) | GetTradeHistory, GetTradeOffers, GetPlayerSummaries, GetAssetClassInfo | Oui, via cookies Steam |
+| **Publisher** (`STEAM_PUBLISHER_API_KEY`) | [Steamworks partner](https://partner.steamgames.com/doc/webapi_overview/auth) | GetInventory, GetAssetPrices (+ tous les endpoints utilisateur) | Non, manuelle |
+
+**Important**: Bien que la documentation Steamworks indique que GetAssetPrices accepte une cle utilisateur, les tests montrent qu une cle utilisateur standard retourne 403 Forbidden. Cet endpoint necessite en pratique une cle publisher associee a l appid. La cle utilisateur de `/dev/apikey` fonctionne uniquement pour GetTradeHistory et GetTradeOffers (IEconService).
 
 ### Documentation des endpoints
 
