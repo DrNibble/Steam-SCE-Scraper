@@ -350,12 +350,12 @@ export async function getRecentSale(marketHashName, days = 7) {
  *
  * @param {object} card - Objet carte depuis la DB (doit avoir .hash)
  * @param {number} days - Fenêtre en jours (défaut: 7)
- * @returns {Promise<object>} - { priceEur, sales7d, source, reason }
+ * @returns {Promise<object>} - { priceEur, sales7d, lastSalePriceEur, source, reason }
  */
 export async function resolveCardPrice(card, days = 7) {
     const marketHashName = card.hash;
     if (!marketHashName) {
-        return { priceEur: null, sales7d: 0, source: 'no_hash', reason: 'Pas de hash' };
+        return { priceEur: null, sales7d: 0, lastSalePriceEur: null, source: 'no_hash', reason: 'Pas de hash' };
     }
 
     // Étape 1 : Vérifier l'historique des ventes (requiert auth)
@@ -366,6 +366,7 @@ export async function resolveCardPrice(card, days = 7) {
         return {
             priceEur: recentSale.price,
             sales7d: recentSale.totalVolume || recentSale.salesCount,
+            lastSalePriceEur: recentSale.price,
             source: 'last_sale',
             reason: `Vente dans les ${days} derniers jours`,
             saleDate: recentSale.date,
@@ -385,6 +386,7 @@ export async function resolveCardPrice(card, days = 7) {
         return {
             priceEur,
             sales7d: 0,
+            lastSalePriceEur: null,
             source: 'highest_buy_order',
             reason: 'Aucune vente dans les 7 derniers jours',
             buyOrderUsd: orderbook.highestBuyOrder,
@@ -396,6 +398,7 @@ export async function resolveCardPrice(card, days = 7) {
     return {
         priceEur: null,
         sales7d: 0,
+        lastSalePriceEur: null,
         source: 'no_data',
         reason: 'Aucune vente et aucun buy order',
     };
@@ -465,6 +468,7 @@ export async function fetchMarketPricesV2(appid, delayMs = 500) {
             priceMap.set(card.hash, {
                 priceEur: result.priceEur,
                 sales7d: result.sales7d || 0,
+                lastSalePriceEur: result.lastSalePriceEur ?? null,
             });
 
             ES_log(`[fetchMarketPricesV2] → ${result.source}: ${

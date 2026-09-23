@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS cards (
     sce_price                 INTEGER DEFAULT 0,
     sce_market_price_usd      REAL DEFAULT 0,
     steam_market_price_eur     REAL,
+    steam_market_last_sale_price_eur REAL,
     steam_market_sales_7d      INTEGER DEFAULT 0,
     steam_market_fetched_at    INTEGER,
     sce_quick_trade           TEXT,
@@ -116,6 +117,7 @@ export function initDB() {
     // --- Migrations: ajouter les colonnes si elles n'existent pas ---
     const migrations = [
         'ALTER TABLE cards ADD COLUMN steam_market_price_eur REAL',
+        'ALTER TABLE cards ADD COLUMN steam_market_last_sale_price_eur REAL',
         'ALTER TABLE cards ADD COLUMN steam_market_sales_7d INTEGER DEFAULT 0',
         'ALTER TABLE cards ADD COLUMN steam_market_fetched_at INTEGER',
         // NULL par defaut : distingue "pas encore verifie" (NULL) de "verifie sans badge" (0)
@@ -234,11 +236,12 @@ export function upsertCards(appid, cards) {
     // Avant de supprimer/reinserer, on sauvegarde les prix marche Steam existants
     // pour ne pas les perdre (ils sont recuperes separement via fetchSteamMarketPrices)
     const existingPrices = {};
-    const existingRows = db.prepare('SELECT hash, steam_market_price_eur, steam_market_sales_7d, steam_market_fetched_at FROM cards WHERE appid = ?').all(String(appid));
+    const existingRows = db.prepare('SELECT hash, steam_market_price_eur, steam_market_last_sale_price_eur, steam_market_sales_7d, steam_market_fetched_at FROM cards WHERE appid = ?').all(String(appid));
     for (const row of existingRows) {
         if (row.hash) {
             existingPrices[row.hash] = {
                 price: row.steam_market_price_eur,
+                lastSalePrice: row.steam_market_last_sale_price_eur,
                 sales: row.steam_market_sales_7d,
                 fetchedAt: row.steam_market_fetched_at,
             };
@@ -248,17 +251,18 @@ export function upsertCards(appid, cards) {
     const stmt = db.prepare(`
         INSERT INTO cards (appid, name, card_index, qty, hash, icon_url, art_url, inv_json,
             sce_stock, sce_worth, sce_price, sce_market_price_usd,
-            steam_market_price_eur, steam_market_sales_7d, steam_market_fetched_at,
+            steam_market_price_eur, steam_market_last_sale_price_eur, steam_market_sales_7d, steam_market_fetched_at,
             sce_quick_trade)
         VALUES (@appid, @name, @card_index, @qty, @hash, @icon_url, @art_url, @inv_json,
             @sce_stock, @sce_worth, @sce_price, @sce_market_price_usd,
-            @steam_market_price_eur, @steam_market_sales_7d, @steam_market_fetched_at,
+            @steam_market_price_eur, @steam_market_last_sale_price_eur, @steam_market_sales_7d, @steam_market_fetched_at,
             @sce_quick_trade)
         ON CONFLICT(appid, hash) DO UPDATE SET
             name=@name, card_index=@card_index, qty=@qty, icon_url=@icon_url, art_url=@art_url,
             inv_json=@inv_json, sce_stock=@sce_stock, sce_worth=@sce_worth, sce_price=@sce_price,
             sce_market_price_usd=@sce_market_price_usd,
             steam_market_price_eur=COALESCE(@steam_market_price_eur, steam_market_price_eur),
+            steam_market_last_sale_price_eur=COALESCE(@steam_market_last_sale_price_eur, steam_market_last_sale_price_eur),
             steam_market_sales_7d=COALESCE(@steam_market_sales_7d, steam_market_sales_7d),
             steam_market_fetched_at=COALESCE(@steam_market_fetched_at, steam_market_fetched_at),
             sce_quick_trade=@sce_quick_trade
@@ -273,6 +277,7 @@ export function upsertCards(appid, cards) {
             const hash = card.hash || null;
             const existing = hash ? existingPrices[hash] : null;
             const cardPrice = card.steamMarketPriceEur ?? card.steam_market_price_eur ?? null;
+            const cardLastSalePrice = card.steamMarketLastSalePriceEur ?? card.steam_market_last_sale_price_eur ?? null;
             const cardSales = card.steamMarketSales7d ?? card.steam_market_sales_7d ?? null;
             const cardFetchedAt = card.steamMarketFetchedAt ?? card.steam_market_fetched_at ?? null;
 
@@ -291,6 +296,7 @@ export function upsertCards(appid, cards) {
                 sce_market_price_usd: card['sce marketPriceUSD'] || 0,
                 // Preserve existing market prices if not provided in card object
                 steam_market_price_eur: cardPrice ?? existing?.price ?? null,
+                steam_market_last_sale_price_eur: cardLastSalePrice ?? existing?.lastSalePrice ?? null,
                 steam_market_sales_7d: cardSales ?? existing?.sales ?? 0,
                 steam_market_fetched_at: cardFetchedAt ?? existing?.fetchedAt ?? null,
                 sce_quick_trade: card['sce quick-trade'] || null,
@@ -312,14 +318,21 @@ export function getCards(appid) {
  * @param {string} hash - market hash de la carte (sans "(trading card)")
  * @param {number|null} priceEur - prix en EUR (null si inconnu)
  * @param {number} sales7d - nombre de ventes dans les 7 derniers jours
+ * @param {number|null} [lastSalePriceEur] - prix de la derniere vente dans les 7 jours (null si pas de vente)
  */
-export function updateCardMarketPrice(appid, hash, priceEur, sales7d) {
+export function updateCardMarketPrice(appid, hash, priceEur, sales7d, lastSalePriceEur) {
+    const hasLastSalePrice = lastSalePriceEur !== undefined;
     db.prepare(`
         UPDATE cards
-        SET steam_market_price_eur = ?, steam_market_sales_7d = ?, steam_market_fetched_at = ?
+        SET steam_market_price_eur = ?,
+            steam_market_last_sale_price_eur = CASE WHEN ? THEN ? ELSE steam_market_last_sale_price_eur END,
+            steam_market_sales_7d = ?,
+            steam_market_fetched_at = ?
         WHERE appid = ? AND hash = ?
     `).run(
         priceEur !== null && priceEur !== undefined ? priceEur : null,
+        hasLastSalePrice ? 1 : 0,
+        hasLastSalePrice ? (lastSalePriceEur !== null ? lastSalePriceEur : null) : null,
         sales7d || 0,
         Date.now(),
         String(appid),
@@ -330,19 +343,25 @@ export function updateCardMarketPrice(appid, hash, priceEur, sales7d) {
 /**
  * Met a jour les prix marche Steam pour toutes les cartes d'un jeu
  * @param {string} appid
- * @param {Map} priceMap - Map<hash, {priceEur, sales7d}>
+ * @param {Map} priceMap - Map<hash, {priceEur, sales7d, lastSalePriceEur}>
  */
 export function updateCardMarketPrices(appid, priceMap) {
     const stmt = db.prepare(`
         UPDATE cards
-        SET steam_market_price_eur = ?, steam_market_sales_7d = ?, steam_market_fetched_at = ?
+        SET steam_market_price_eur = ?,
+            steam_market_last_sale_price_eur = CASE WHEN ? THEN ? ELSE steam_market_last_sale_price_eur END,
+            steam_market_sales_7d = ?,
+            steam_market_fetched_at = ?
         WHERE appid = ? AND hash = ?
     `);
     const transaction = db.transaction((appidStr, map) => {
         const now = Date.now();
         for (const [hash, data] of map) {
+            const hasLastSalePrice = Object.prototype.hasOwnProperty.call(data, 'lastSalePriceEur');
             stmt.run(
                 data.priceEur !== null && data.priceEur !== undefined ? data.priceEur : null,
+                hasLastSalePrice ? 1 : 0,
+                hasLastSalePrice ? (data.lastSalePriceEur !== null && data.lastSalePriceEur !== undefined ? data.lastSalePriceEur : null) : null,
                 data.sales7d || 0,
                 now,
                 appidStr,

@@ -117,6 +117,7 @@ function migrateCardsTable() {
         'steam_market_sell_price_eur REAL',     // Prix de vente le plus bas (EUR)
         'steam_market_sell_qty INTEGER',        // Quantité au prix de vente le plus bas
         'steam_market_buy_order_eur REAL',      // Demande d'achat la plus haute (EUR)
+        'steam_market_last_sale_price_eur REAL', // Prix de la derniere vente dans les 7 jours (EUR)
     ];
     for (const col of newColumns) {
         const colName = col.split(' ')[0];
@@ -368,6 +369,7 @@ async function processCard(item) {
         let buyOrderEur = null;      // Demande d'achat la plus haute (EUR)
         let sales7d = 0;              // Volume de vente cumulé sur 7 jours
         let priceEur = null;         // Dernier prix vendu si <7j, sinon buy order
+        let lastSalePriceEur = null; // Prix de la derniere vente dans les 7 jours (null si pas de vente)
 
         // Étape 1 : priceoverview — prix de vente EUR (pas d'auth)
         const pov = await getPriceOverview(marketHashName);
@@ -400,6 +402,7 @@ async function processCard(item) {
             sales7d = recentSale.totalVolume || 0;
             // Dernier prix de vente si vente < 7j
             priceEur = recentSale.price;
+            lastSalePriceEur = recentSale.price;
         }
 
         // Si pas de vente récente, le prix résolu est le buy order
@@ -413,6 +416,7 @@ async function processCard(item) {
         db.prepare(`
             UPDATE cards
             SET steam_market_price_eur = ?,
+                steam_market_last_sale_price_eur = ?,
                 steam_market_sales_7d = ?,
                 steam_market_sell_price_eur = ?,
                 steam_market_sell_qty = ?,
@@ -421,6 +425,7 @@ async function processCard(item) {
             WHERE appid = ? AND hash = ?
         `).run(
             priceEur,
+            lastSalePriceEur,
             sales7d,
             sellPriceEur,
             sellQty,
@@ -435,7 +440,7 @@ async function processCard(item) {
             .run('done', Date.now(), item.id);
 
         bucket.success();
-        return { success: true, priceEur, sellPriceEur, buyOrderEur, sales7d };
+        return { success: true, priceEur, lastSalePriceEur, sellPriceEur, buyOrderEur, sales7d };
 
     } catch (err) {
         // Si 429, le token bucket va gérer le cooldown

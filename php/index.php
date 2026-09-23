@@ -319,6 +319,9 @@ $profileLink = STEAM_PROFILE_PATH;
                             $marketFresh = $fetchedAt > 0 && $fetchedAt >= ((time() * 1000) - 24 * 60 * 60 * 1000);
                         ?>
                             <?= fmtEur($cardRow['steam_market_price_eur']) ?>
+                            <?php if (($cardRow['steam_market_last_sale_price_eur'] ?? null) !== null && ($cardRow['steam_market_last_sale_price_eur'] ?? '') !== ''): ?>
+                                <br><small>Dernière vente 7j : <?= fmtEur($cardRow['steam_market_last_sale_price_eur']) ?></small>
+                            <?php endif; ?>
                             <br><small>Vente < 7j</small>
                             <?php if (!$marketFresh): ?>
                                 <br><small style="color:#ff9d00;">données obsolètes</small>
