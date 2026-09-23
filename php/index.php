@@ -317,16 +317,9 @@ $profileLink = STEAM_PROFILE_PATH;
                             $cardRow = $exp['_card'];
                             $fetchedAt = (int)($cardRow['steam_market_fetched_at'] ?? 0);
                             $marketFresh = $fetchedAt > 0 && $fetchedAt >= ((time() * 1000) - 24 * 60 * 60 * 1000);
-                            $saleDate = (int)($cardRow['steam_market_sale_date'] ?? 0);
-                            $marketUrl = 'https://steamcommunity.com/market/listings/753/' . urlencode($cardRow['hash'] ?? '');
                         ?>
-                            <a href="<?= e($marketUrl) ?>" target="_blank" class="game-link">
-                                <?= fmtEur($cardRow['steam_market_price_eur']) ?>
-                            </a>
-                            <br><small>Dernier prix vendu</small>
-                            <?php if ($saleDate > 0): ?>
-                                <br><small style="color:#8f98a0;"><?= date('d/m/Y', (int)round($saleDate / 1000)) ?></small>
-                            <?php endif; ?>
+                            <?= fmtEur($cardRow['steam_market_price_eur']) ?>
+                            <br><small>Vente < 7j</small>
                             <?php if (!$marketFresh): ?>
                                 <br><small style="color:#ff9d00;">données obsolètes</small>
                             <?php endif; ?>
@@ -383,7 +376,7 @@ $profileLink = STEAM_PROFILE_PATH;
                                 <?= $item['count'] > 1 ? '<b>(x' . fmt($item['count']) . ')</b>' : '' ?>
                                 [<?= fmt($c['sce_price']) ?>c]
                                 <?php if (hasRecentSales($c)): ?>
-                                    <small style="color:#8f98a0;"> Vendu <?= fmtEur($c['steam_market_price_eur']) ?> le <?= date('d/m/Y', (int)round(($c['steam_market_sale_date'] ?? 0) / 1000)) ?></small>
+                                    <small style="color:#8f98a0;"> Vente < 7j : <?= fmtEur($c['steam_market_price_eur']) ?></small>
                                 <?php endif; ?>
                             </a>
                         <?php endforeach; ?>

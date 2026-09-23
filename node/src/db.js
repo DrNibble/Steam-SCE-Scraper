@@ -97,7 +97,6 @@ CREATE TABLE IF NOT EXISTS cards (
     steam_market_price_eur     REAL,
     steam_market_sales_7d      INTEGER DEFAULT 0,
     steam_market_fetched_at    INTEGER,
-    steam_market_sale_date     INTEGER,
     sce_quick_trade           TEXT,
     UNIQUE(appid, hash),
     FOREIGN KEY(appid) REFERENCES games(appid) ON DELETE CASCADE
@@ -119,7 +118,6 @@ export function initDB() {
         'ALTER TABLE cards ADD COLUMN steam_market_price_eur REAL',
         'ALTER TABLE cards ADD COLUMN steam_market_sales_7d INTEGER DEFAULT 0',
         'ALTER TABLE cards ADD COLUMN steam_market_fetched_at INTEGER',
-        'ALTER TABLE cards ADD COLUMN steam_market_sale_date INTEGER',
         // NULL par defaut : distingue "pas encore verifie" (NULL) de "verifie sans badge" (0)
         'ALTER TABLE games ADD COLUMN badge_crafted INTEGER',
         // Date du dernier check badge_crafted (cache anti rate-limit steam.js)
@@ -236,14 +234,13 @@ export function upsertCards(appid, cards) {
     // Avant de supprimer/reinserer, on sauvegarde les prix marche Steam existants
     // pour ne pas les perdre (ils sont recuperes separement via fetchSteamMarketPrices)
     const existingPrices = {};
-    const existingRows = db.prepare('SELECT hash, steam_market_price_eur, steam_market_sales_7d, steam_market_fetched_at, steam_market_sale_date FROM cards WHERE appid = ?').all(String(appid));
+    const existingRows = db.prepare('SELECT hash, steam_market_price_eur, steam_market_sales_7d, steam_market_fetched_at FROM cards WHERE appid = ?').all(String(appid));
     for (const row of existingRows) {
         if (row.hash) {
             existingPrices[row.hash] = {
                 price: row.steam_market_price_eur,
                 sales: row.steam_market_sales_7d,
                 fetchedAt: row.steam_market_fetched_at,
-                saleDate: row.steam_market_sale_date,
             };
         }
     }
@@ -296,7 +293,6 @@ export function upsertCards(appid, cards) {
                 steam_market_price_eur: cardPrice ?? existing?.price ?? null,
                 steam_market_sales_7d: cardSales ?? existing?.sales ?? 0,
                 steam_market_fetched_at: cardFetchedAt ?? existing?.fetchedAt ?? null,
-                steam_market_sale_date: card.steamMarketSaleDate ?? card.steam_market_sale_date ?? existing?.saleDate ?? null,
                 sce_quick_trade: card['sce quick-trade'] || null,
             });
         }
@@ -317,16 +313,15 @@ export function getCards(appid) {
  * @param {number|null} priceEur - prix en EUR (null si inconnu)
  * @param {number} sales7d - nombre de ventes dans les 7 derniers jours
  */
-export function updateCardMarketPrice(appid, hash, priceEur, sales7d, saleDate) {
+export function updateCardMarketPrice(appid, hash, priceEur, sales7d) {
     db.prepare(`
         UPDATE cards
-        SET steam_market_price_eur = ?, steam_market_sales_7d = ?, steam_market_fetched_at = ?, steam_market_sale_date = ?
+        SET steam_market_price_eur = ?, steam_market_sales_7d = ?, steam_market_fetched_at = ?
         WHERE appid = ? AND hash = ?
     `).run(
         priceEur !== null && priceEur !== undefined ? priceEur : null,
         sales7d || 0,
         Date.now(),
-        saleDate ?? null,
         String(appid),
         hash
     );
@@ -340,7 +335,7 @@ export function updateCardMarketPrice(appid, hash, priceEur, sales7d, saleDate) 
 export function updateCardMarketPrices(appid, priceMap) {
     const stmt = db.prepare(`
         UPDATE cards
-        SET steam_market_price_eur = ?, steam_market_sales_7d = ?, steam_market_fetched_at = ?, steam_market_sale_date = ?
+        SET steam_market_price_eur = ?, steam_market_sales_7d = ?, steam_market_fetched_at = ?
         WHERE appid = ? AND hash = ?
     `);
     const transaction = db.transaction((appidStr, map) => {
@@ -350,7 +345,6 @@ export function updateCardMarketPrices(appid, priceMap) {
                 data.priceEur !== null && data.priceEur !== undefined ? data.priceEur : null,
                 data.sales7d || 0,
                 now,
-                data.saleDate ?? null,
                 appidStr,
                 hash
             );
