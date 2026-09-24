@@ -833,7 +833,7 @@ ES_log("[getPageAppids] Entrée fonction");
                     marketDiv.className = "es-market-info";
                     marketDiv.style.cssText = `
                         position: absolute;
-                        top: 4px;
+                        bottom: 4px;
                         left: 4px;
                         right: 4px;
                         font-size: 10px;
