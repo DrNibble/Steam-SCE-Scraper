@@ -423,8 +423,17 @@ export async function resolveCardPrice(card, days = 7) {
         return { priceEur: null, sales7d: 0, lastSalePriceEur: null, source: 'no_hash', reason: 'Pas de hash' };
     }
 
-    // Étape 1 : Vérifier l'historique des ventes (requiert auth)
+    // Étape 1 : Page listing — sell/buy orders en EUR directement (pas de conversion)
+    const listing = await getListingPageInfo(marketHashName);
+
+    // Étape 2 : Vérifier l'historique des ventes (requiert auth)
     const recentSale = await getRecentSale(marketHashName, days);
+
+    // Sell/buy orders depuis la listing page (disponibles dans tous les cas)
+    const sellPriceEur = listing?.sellPriceEur ?? null;
+    const sellQty = listing?.sellQty ?? null;
+    const buyOrderEur = listing?.buyPriceEur ?? null;
+    const buyOrderQty = listing?.buyQty ?? null;
 
     if (recentSale) {
         // Vente trouvée dans les 7 derniers jours → dernier prix de vente
@@ -432,19 +441,35 @@ export async function resolveCardPrice(card, days = 7) {
             priceEur: recentSale.price,
             sales7d: recentSale.totalVolume || recentSale.salesCount,
             lastSalePriceEur: recentSale.price,
+            sellPriceEur,
+            sellQty,
+            buyOrderEur,
+            buyOrderQty,
             source: 'last_sale',
             reason: `Vente dans les ${days} derniers jours`,
             saleDate: recentSale.date,
         };
     }
 
-    // Pas de vente dans les 7 derniers jours → buy order le plus haut
+    // Pas de vente dans les 7 derniers jours → buy order depuis la listing page (EUR direct)
+    if (buyOrderEur !== null) {
+        return {
+            priceEur: buyOrderEur,
+            sales7d: 0,
+            lastSalePriceEur: null,
+            sellPriceEur,
+            sellQty,
+            buyOrderEur,
+            buyOrderQty,
+            source: 'highest_buy_order',
+            reason: 'Aucune vente dans les 7 derniers jours',
+        };
+    }
+
+    // Fallback : orderbook (USD → EUR approximatif) si la listing page n'a pas marché
     const orderbook = await getOrderbook(marketHashName);
 
     if (orderbook && orderbook.highestBuyOrder) {
-        // Le buy order est en USD (eCurrency=1), conversion approximative en EUR
-        // Pour un prix exact en EUR, il faudrait un taux de change temps réel
-        // Ici on utilise un taux fixe approximatif (à ajuster si besoin)
         const USD_TO_EUR = 0.92;
         const priceEur = Math.round(orderbook.highestBuyOrder * USD_TO_EUR * 100) / 100;
 
@@ -452,8 +477,12 @@ export async function resolveCardPrice(card, days = 7) {
             priceEur,
             sales7d: 0,
             lastSalePriceEur: null,
+            sellPriceEur,
+            sellQty,
+            buyOrderEur: priceEur,
+            buyOrderQty: listing?.buyQty ?? null,
             source: 'highest_buy_order',
-            reason: 'Aucune vente dans les 7 derniers jours',
+            reason: 'Aucune vente dans les 7 derniers jours (orderbook fallback)',
             buyOrderUsd: orderbook.highestBuyOrder,
             totalBuyOrders: orderbook.totalBuyOrders,
         };
@@ -464,6 +493,10 @@ export async function resolveCardPrice(card, days = 7) {
         priceEur: null,
         sales7d: 0,
         lastSalePriceEur: null,
+        sellPriceEur,
+        sellQty,
+        buyOrderEur,
+        buyOrderQty,
         source: 'no_data',
         reason: 'Aucune vente et aucun buy order',
     };
@@ -536,6 +569,12 @@ export async function fetchMarketPricesV2(appid, delayMs = 500) {
                 sales7d: result.sales7d || 0,
                 lastSalePriceEur: result.lastSalePriceEur !== null && result.lastSalePriceEur !== undefined
                     ? Math.round(result.lastSalePriceEur * 100) / 100 : null,
+                sellPriceEur: result.sellPriceEur !== null && result.sellPriceEur !== undefined
+                    ? Math.round(result.sellPriceEur * 100) / 100 : null,
+                sellQty: result.sellQty ?? null,
+                buyOrderEur: result.buyOrderEur !== null && result.buyOrderEur !== undefined
+                    ? Math.round(result.buyOrderEur * 100) / 100 : null,
+                buyOrderQty: result.buyOrderQty ?? null,
             });
 
             ES_log(`[fetchMarketPricesV2] → ${result.source}: ${
@@ -543,7 +582,7 @@ export async function fetchMarketPricesV2(appid, delayMs = 500) {
             } (${result.reason})`);
         } catch (err) {
             ES_log(`[fetchMarketPricesV2] Erreur pour ${card.hash}: ${err.message}`);
-            priceMap.set(card.hash, { priceEur: null, sales7d: 0 });
+            priceMap.set(card.hash, { priceEur: null, sales7d: 0, sellPriceEur: null, sellQty: null, buyOrderEur: null, buyOrderQty: null });
         }
 
         // Délai anti-rate-limit entre les cartes

@@ -344,7 +344,7 @@ export function getCards(appid) {
 /**
  * Met a jour le prix marche Steam pour une carte donnee
  * @param {string} appid
- * @param {string} hash - market hash de la carte (sans "(trading card)")
+ * @param {string} hash - market_hash_name de la carte (ex: "664320-Loki (Trading Card)")
  * @param {number|null} priceEur - prix en EUR (null si inconnu)
  * @param {number} sales7d - nombre de ventes dans les 7 derniers jours
  * @param {number|null} [lastSalePriceEur] - prix de la derniere vente dans les 7 jours (null si pas de vente)
@@ -380,7 +380,11 @@ export function updateCardMarketPrices(appid, priceMap) {
         SET steam_market_price_eur = ?,
             steam_market_last_sale_price_eur = CASE WHEN ? THEN ? ELSE steam_market_last_sale_price_eur END,
             steam_market_sales_7d = ?,
-            steam_market_fetched_at = ?
+            steam_market_fetched_at = ?,
+            steam_market_sell_price_eur = ?,
+            steam_market_sell_qty = ?,
+            steam_market_buy_order_eur = ?,
+            steam_market_buy_order_qty = ?
         WHERE appid = ? AND hash = ?
     `);
     const transaction = db.transaction((appidStr, map) => {
@@ -393,6 +397,10 @@ export function updateCardMarketPrices(appid, priceMap) {
                 hasLastSalePrice ? (data.lastSalePriceEur !== null && data.lastSalePriceEur !== undefined ? data.lastSalePriceEur : null) : null,
                 data.sales7d || 0,
                 now,
+                data.sellPriceEur ?? null,
+                data.sellQty ?? null,
+                data.buyOrderEur ?? null,
+                data.buyOrderQty ?? null,
                 appidStr,
                 hash
             );
