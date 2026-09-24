@@ -117,7 +117,7 @@ async function _fetchSCEGlobalInfoInner() {
         // Debug: verifier si on est sur une page de connexion
         const titleMatch = profileHtml.match(/<title>(.*?)<\/title>/i);
         const pageTitle = titleMatch ? titleMatch[1].trim() : '(inconnu)';
-        ES_log(`[fetchSCEGlobalInfo] Titre de la page: ${pageTitle}`);
+        //ES_log(`[fetchSCEGlobalInfo] Titre de la page: ${pageTitle}`);
 
         // Detection du mur de connexion: SCE affiche "Please login" si le PHPSESSID est expire
         if (profileHtml.includes('Please login to see your profile')) {
@@ -171,7 +171,7 @@ async function _fetchSCEGlobalInfoInner() {
         }
 
         if (getSCECookie()) {
-            ES_log(`[fetchSCEGlobalInfo] Cookie SCE present (${getSCECookie().substring(0, 30)}...)`);
+           // ES_log(`[fetchSCEGlobalInfo] Cookie SCE present (${getSCECookie().substring(0, 30)}...)`);
         } else {
             ES_log('[fetchSCEGlobalInfo] ATTENTION: SCE_COOKIE non defini dans .env');
             ES_log('[fetchSCEGlobalInfo] Recuperez le PHPSESSID depuis votre navigateur:');
@@ -187,7 +187,7 @@ async function _fetchSCEGlobalInfoInner() {
         const creditEl = $('.inventory-user-credits .number');
         if (creditEl.length > 0) {
             rawCreditText = creditEl.text();
-            ES_log(`[fetchSCEGlobalInfo] Credit trouve via .inventory-user-credits .number: "${rawCreditText}"`);
+            //ES_log(`[fetchSCEGlobalInfo] Credit trouve via .inventory-user-credits .number: "${rawCreditText}"`);
         }
 
         // Strategie 2: nav bar desktop (ancien selecteur)
@@ -195,7 +195,7 @@ async function _fetchSCEGlobalInfoInner() {
             const desktopCreditEl = $('nav .hidden.lg\\:block button div.ml-auto');
             if (desktopCreditEl.length > 0) {
                 rawCreditText = desktopCreditEl.text();
-                ES_log(`[fetchSCEGlobalInfo] Credit trouve via nav button div.ml-auto: "${rawCreditText}"`);
+               // ES_log(`[fetchSCEGlobalInfo] Credit trouve via nav button div.ml-auto: "${rawCreditText}"`);
             }
         }
 
@@ -205,7 +205,7 @@ async function _fetchSCEGlobalInfoInner() {
                 const text = $(el).text().trim();
                 if (/^\d+\s*c$/i.test(text) || /^\d+\s*credits?$/i.test(text) || /^credits?:\s*\d+$/i.test(text)) {
                     rawCreditText = text;
-                    ES_log(`[fetchSCEGlobalInfo] Credit trouve via text search nav: "${rawCreditText}"`);
+                   // ES_log(`[fetchSCEGlobalInfo] Credit trouve via text search nav: "${rawCreditText}"`);
                     return false;
                 }
             });
@@ -218,7 +218,7 @@ async function _fetchSCEGlobalInfoInner() {
                 if (/^\d+\s*c$/i.test(text) || /^\d+\s*credits?$/i.test(text) || /^credits?:\s*\d+$/i.test(text)) {
                     if (!/max/i.test(text)) {
                         rawCreditText = text;
-                        ES_log(`[fetchSCEGlobalInfo] Credit trouve via text search main: "${rawCreditText}"`);
+                       // ES_log(`[fetchSCEGlobalInfo] Credit trouve via text search main: "${rawCreditText}"`);
                         return false;
                     }
                 }
@@ -226,9 +226,9 @@ async function _fetchSCEGlobalInfoInner() {
         }
 
         if (!rawCreditText) {
-            ES_log('[fetchSCEGlobalInfo] ATTENTION: impossible de trouver le credit dans le HTML du profil.');
+           // ES_log('[fetchSCEGlobalInfo] ATTENTION: impossible de trouver le credit dans le HTML du profil.');
             const mainContent = $('main').text().trim().substring(0, 500);
-            ES_log(`[fetchSCEGlobalInfo] Contenu de <main>: ${mainContent}`);
+           // ES_log(`[fetchSCEGlobalInfo] Contenu de <main>: ${mainContent}`);
         }
 
         const sceCredit = parseInt(rawCreditText.replace(/\D/g, ''), 10) || 0;
@@ -280,15 +280,15 @@ async function _fetchSCEGlobalInfoInner() {
                 });
 
                 if (foundStatus) {
-                    ES_log('[fetchSCEGlobalInfo] Statut du bot recupere depuis la page inventory.');
+                   // ES_log('[fetchSCEGlobalInfo] Statut du bot recupere depuis la page inventory.');
                 }
             } catch (invErr) {
-                ES_log(`[fetchSCEGlobalInfo] Erreur lors du fetch de la page inventory: ${invErr.message}`);
+               // ES_log(`[fetchSCEGlobalInfo] Erreur lors du fetch de la page inventory: ${invErr.message}`);
             }
         }
 
         if (!foundStatus) {
-            console.warn('[SCE] Impossible de localiser les stats du bot (offers pending / wait time).');
+           // console.warn('[SCE] Impossible de localiser les stats du bot (offers pending / wait time).');
         }
 
         setMeta('scePendingOffers', String(pendingOffers));
