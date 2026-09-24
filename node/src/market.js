@@ -214,6 +214,71 @@ export async function getOrderbook(marketHashName) {
 
 
 // ═══════════════════════════════════════════════════════════════
+// 2b) Listing page — parse HTML pour sell/buy orders en EUR (pas d'API)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Récupère les informations de vente et d'achat depuis la page listing Steam.
+ *
+ * La page listing (https://steamcommunity.com/market/listings/753/HASH) contient
+ * des spans avec des classes dynamiques (React) affichant:
+ *   - "10 à vendre à partir de €0,97" (FR) / "10 for sale starting at €0.97" (EN)
+ *   - "7 demandes d'achat à €0,09 ou moins" (FR) / "7 buy orders at €0.09 or lower" (EN)
+ *
+ * Avantage: les prix sont en EUR directement (pas de conversion USD → EUR).
+ * Inconvénient: parse HTML (les classes CSS changent à chaque build Steam).
+ * On utilise donc regex sur le texte débarrassé des tags HTML.
+ *
+ * @param {string} marketHashName - Le market_hash_name (ex: "585360-Gregory (Trading Card)")
+ * @returns {Promise<object|null>} - { sellQty, sellPriceEur, buyQty, buyPriceEur } ou null
+ */
+export async function getListingPageInfo(marketHashName) {
+    const url = `https://steamcommunity.com/market/listings/${MARKET_APPID}/${encodeURIComponent(marketHashName)}`;
+
+    try {
+        const html = await httpGet(url, {
+            cookies: getSteamCookie(),
+            accept: 'text/html',
+            retries: 3,
+            extraHeaders: {
+                'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
+            },
+        });
+
+        // Strip HTML tags pour obtenir du texte brut
+        const text = html
+            .replace(/<[^>]+>/g, ' ')
+            .replace(/&nbsp;/g, ' ')
+            .replace(/&#8364;/g, '€')
+            .replace(/&euro;/g, '€')
+            .replace(/\s+/g, ' ');
+
+        // Parse sell orders: "10 à vendre à partir de €0,97" ou "10 for sale starting at €0.97"
+        // Le volume peut contenir des espaces (ex: "1 649")
+        const sellMatch = text.match(/(\d[\d\s]*)\s+(?:à vendre|for sale)[^€]*€([\d.,]+)/i);
+
+        // Parse buy orders: "7 demandes d'achat à €0,09 ou moins" ou "7 buy orders at €0.09 or lower"
+        const buyMatch = text.match(/(\d[\d\s]*)\s+(?:demandes d'achat|buy orders)[^€]*€([\d.,]+)/i);
+
+        const sellQty = sellMatch ? parseInt(sellMatch[1].replace(/\s/g, ''), 10) : null;
+        const sellPriceEur = sellMatch ? parseSteamPriceEur('€' + sellMatch[2]) : null;
+        const buyQty = buyMatch ? parseInt(buyMatch[1].replace(/\s/g, ''), 10) : null;
+        const buyPriceEur = buyMatch ? parseSteamPriceEur('€' + buyMatch[2]) : null;
+
+        ES_log(`[getListingPageInfo] ${marketHashName} → sell: ${sellQty != null ? sellQty : 'N/A'} @ ${sellPriceEur != null ? sellPriceEur + '€' : 'N/A'} | buy: ${buyQty != null ? buyQty : 'N/A'} @ ${buyPriceEur != null ? buyPriceEur + '€' : 'N/A'}`);
+
+        return { sellQty, sellPriceEur, buyQty, buyPriceEur };
+    } catch (err) {
+        if (err.message && err.message.includes('429')) {
+            throw err;
+        }
+        ES_log(`[getListingPageInfo] Erreur pour ${marketHashName}: ${err.message}`);
+        return null;
+    }
+}
+
+
+// ═══════════════════════════════════════════════════════════════
 // 2) Price history — historique des ventes (requiert auth)
 // ═══════════════════════════════════════════════════════════════
 

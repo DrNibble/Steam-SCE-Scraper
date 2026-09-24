@@ -39,7 +39,7 @@
 
 import { getDB } from './db.js';
 import { sleep, ES_log } from './utils.js';
-import { getOrderbook, getRecentSale, getPriceOverview, MARKET_PRICE_REFRESH_MS } from './market.js';
+import { getOrderbook, getRecentSale, getPriceOverview, getListingPageInfo, MARKET_PRICE_REFRESH_MS } from './market.js';
 
 // ═══════════════════════════════════════════════════════════════
 // Configuration du token bucket
@@ -117,6 +117,7 @@ function migrateCardsTable() {
         'steam_market_sell_price_eur REAL',     // Prix de vente le plus bas (EUR)
         'steam_market_sell_qty INTEGER',        // Quantité au prix de vente le plus bas
         'steam_market_buy_order_eur REAL',      // Demande d'achat la plus haute (EUR)
+        'steam_market_buy_order_qty INTEGER',   // Nombre de demandes d'achat
         'steam_market_last_sale_price_eur REAL', // Prix de la derniere vente dans les 7 jours (EUR)
     ];
     for (const col of newColumns) {
@@ -370,6 +371,7 @@ async function processCard(item) {
         let sales7d = 0;              // Volume de vente cumulé sur 7 jours
         let priceEur = null;         // Dernier prix vendu si <7j, sinon buy order
         let lastSalePriceEur = null; // Prix de la derniere vente dans les 7 jours (null si pas de vente)
+        let buyOrderQty = null;      // Nombre de demandes d'achat (listing page)
 
         // Étape 1 : priceoverview — prix de vente EUR (pas d'auth)
         const pov = await getPriceOverview(marketHashName);
@@ -396,6 +398,16 @@ async function processCard(item) {
             }
         }
 
+        // Étape 2b : listing page — sell/buy orders en EUR (plus précis que orderbook USD)
+        const listing = await getListingPageInfo(marketHashName);
+        if (listing) {
+            // Les prix EUR de la page listing sont plus précis que la conversion USD → EUR
+            if (listing.sellPriceEur != null) sellPriceEur = listing.sellPriceEur;
+            if (listing.sellQty != null) sellQty = listing.sellQty;
+            if (listing.buyPriceEur != null) buyOrderEur = listing.buyPriceEur;
+            buyOrderQty = listing.buyQty;
+        }
+
         // Étape 3 : pricehistory — volume 7j, dernier prix de vente (auth requise)
         const recentSale = await getRecentSale(marketHashName, 7);
         if (recentSale) {
@@ -410,7 +422,7 @@ async function processCard(item) {
             priceEur = buyOrderEur;
         }
 
-        ES_log(`[processCard] ${marketHashName} → sell:${sellPriceEur !== null ? sellPriceEur + '€' : 'N/A'} x${sellQty || 0} | buy:${buyOrderEur !== null ? buyOrderEur + '€' : 'N/A'} | 7j:${sales7d} ventes | resolved:${priceEur !== null ? priceEur + '€' : 'N/A'}`);
+        ES_log(`[processCard] ${marketHashName} → sell:${sellPriceEur !== null ? sellPriceEur + '€' : 'N/A'} x${sellQty || 0} | buy:${buyOrderEur !== null ? buyOrderEur + '€' : 'N/A'} x${buyOrderQty != null ? buyOrderQty : '?'} | 7j:${sales7d} ventes | resolved:${priceEur !== null ? priceEur + '€' : 'N/A'}`);
 
         // Mettre à jour la DB
         db.prepare(`
@@ -421,6 +433,7 @@ async function processCard(item) {
                 steam_market_sell_price_eur = ?,
                 steam_market_sell_qty = ?,
                 steam_market_buy_order_eur = ?,
+                steam_market_buy_order_qty = ?,
                 steam_market_fetched_at = ?
             WHERE appid = ? AND hash = ?
         `).run(
@@ -430,6 +443,7 @@ async function processCard(item) {
             sellPriceEur,
             sellQty,
             buyOrderEur,
+            buyOrderQty,
             Date.now(),
             String(item.appid),
             marketHashName
@@ -440,7 +454,7 @@ async function processCard(item) {
             .run('done', Date.now(), item.id);
 
         bucket.success();
-        return { success: true, priceEur, lastSalePriceEur, sellPriceEur, buyOrderEur, sales7d };
+        return { success: true, priceEur, lastSalePriceEur, sellPriceEur, sellQty, buyOrderEur, buyOrderQty, sales7d };
 
     } catch (err) {
         // Si 429, le token bucket va gérer le cooldown

@@ -98,7 +98,10 @@ CREATE TABLE IF NOT EXISTS cards (
     steam_market_last_sale_price_eur REAL,
     steam_market_sales_7d      INTEGER DEFAULT 0,
     steam_market_fetched_at    INTEGER,
-    sce_quick_trade           TEXT,
+    steam_market_sell_price_eur REAL,
+    steam_market_sell_qty      INTEGER,
+    steam_market_buy_order_eur REAL,
+    steam_market_buy_order_qty INTEGER,
     UNIQUE(appid, hash),
     FOREIGN KEY(appid) REFERENCES games(appid) ON DELETE CASCADE
 );
