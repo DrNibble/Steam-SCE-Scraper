@@ -662,6 +662,194 @@ export async function syncSteamInventoryHistory(profileLink = null) {
     return Array.from(updatedAppIds);
 }
 
+// --- STEAM COMMUNITY MARKET HISTORY ---
+
+/**
+ * Synchronise l historique des transactions du Marche Communautaire Steam
+ * pour detecter les ventes/achats de cartes et mettre a jour les lasttrade.
+ * Utilise l endpoint /market/myhistory/render/ qui renvoie du JSON structure
+ * (events, listings, purchases, assets) - pas de parsing HTML necessaire.
+ *
+ * Met a jour les lasttrade dans la base, comme syncSteamInventoryHistory,
+ * mais avec un curseur separe (lastmarkettrade) pour eviter les conflits.
+ */
+export async function syncSteamMarketHistory(profileLink = null) {
+    const stopTimestamp = parseInt(getMeta('lastmarkettrade', '0'), 10) || 0;
+    const updatedAppIds = new Set();
+
+    ES_log(`[syncSteamMarketHistory] Point d arret: ${stopTimestamp} (${new Date(stopTimestamp).toLocaleString()})`);
+
+    let start = 0;
+    const COUNT = 500; // Taille de page maximale
+    const MAX_PAGES = 50; // Securite anti-ban
+
+    for (let page = 0; page < MAX_PAGES; page++) {
+        const sessionId = extractSessionIdFromCookies(steamCookie());
+        const baseUrl = sessionId
+            ? `https://steamcommunity.com/market/myhistory/render/?query=&start=${start}&count=${COUNT}&norender=1&sessionid=${sessionId}`
+            : `https://steamcommunity.com/market/myhistory/render/?query=&start=${start}&count=${COUNT}&norender=1`;
+
+        try {
+            const text = await httpGet(baseUrl, {
+                cookies: steamCookie(),
+                accept: 'application/json',
+                extraHeaders: {
+                    ...STEAM_AJAX_HEADERS,
+                    'Referer': 'https://steamcommunity.com/market/myhistory',
+                },
+            });
+
+            // Detection: Steam renvoie du HTML si les cookies sont invalides
+            if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
+                console.error('[syncSteamMarketHistory] Steam a renvoyé du HTML au lieu du JSON.');
+                console.error('Cela signifie que les cookies Steam sont invalides ou expires.');
+                console.error('Supprimez data/steam_refresh_token.txt et relancez pour vous re-authentifier.');
+                const titleMatch = text.match(/<title>(.*?)<\/title>/i);
+                if (titleMatch) console.error(`[syncSteamMarketHistory] Titre de la page: ${titleMatch[1]}`);
+                console.error(`[syncSteamMarketHistory] URL: ${baseUrl}`);
+                console.error(`[syncSteamMarketHistory] Cookie (30 chars): ${(steamCookie() || '').substring(0, 30)}...`);
+                break;
+            }
+
+            const data = JSON.parse(text);
+
+            if (!data.success) {
+                ES_log('[syncSteamMarketHistory] Erreur ou fin de l historique.');
+                break;
+            }
+
+            const events = data.events || [];
+            if (events.length === 0) {
+                ES_log('[syncSteamMarketHistory] Fin de l historique (aucun evenement).');
+                break;
+            }
+
+            ES_log(`[syncSteamMarketHistory] ${events.length} evenement(s) sur la page ${page + 1}.`);
+
+            // Trier par time_event decroissant pour traiter les plus recentes en premier
+            const sortedEvents = [...events].sort((a, b) => b.time_event - a.time_event);
+
+            let shouldStop = false;
+            let newCount = 0;
+
+            for (const event of sortedEvents) {
+                // time_event en secondes + fraction pour la precision sub-seconde
+                const timestamp = event.time_event * 1000 + Math.floor((event.time_event_fraction || 0) / 1e6);
+
+                if (stopTimestamp > 0 && timestamp <= stopTimestamp) {
+                    ES_log(`[syncSteamMarketHistory] ARRET: evenement du ${new Date(timestamp).toLocaleString()} deja traite (ts=${timestamp} <= stop=${stopTimestamp}).`);
+                    shouldStop = true;
+                    break;
+                }
+
+                const eventType = event.event_type === 3 ? 'vente' : (event.event_type === 4 ? 'achat' : `type ${event.event_type}`);
+                ES_log(`[syncSteamMarketHistory] Transaction du ${new Date(timestamp).toLocaleString()}: ${eventType}`);
+                newCount++;
+
+                // Resoudre l appid du jeu via le listing
+                const listing = data.listings ? data.listings[event.listingid] : null;
+                if (!listing) continue;
+
+                // 1. publisher_fee_app (le plus fiable pour les cartes)
+                let appid = listing.publisher_fee_app;
+
+                // 2. Fallback: asset.market_fee_app si present
+                if (!appid && listing.asset && listing.asset.market_fee_app) {
+                    appid = listing.asset.market_fee_app;
+                }
+
+                // 3. Fallback: extraire le prefixe numerique du market_hash_name
+                if (!appid || appid === 753) {
+                    const assetId = listing.asset && listing.asset.id;
+                    const assetAppid = listing.asset && String(listing.asset.appid);
+                    const assetContextid = listing.asset && String(listing.asset.contextid);
+                    if (assetId && assetAppid && data.assets && data.assets[assetAppid] && data.assets[assetAppid][assetContextid]) {
+                        const assetData = data.assets[assetAppid][assetContextid][assetId];
+                        if (assetData && assetData.market_hash_name) {
+                            const prefixMatch = assetData.market_hash_name.match(/^(\d+)-/);
+                            if (prefixMatch) {
+                                appid = parseInt(prefixMatch[1], 10);
+                            }
+                        }
+                    }
+                }
+
+                // Ne pas traiter si on n a resolu qu appid 753 (Steam) sans jeu precis
+                if (!appid || appid === 753) {
+                    ES_log(`[syncSteamMarketHistory] Appid non resolu (753/Steam), transaction ignoree.`);
+                    continue;
+                }
+
+                appid = String(appid);
+
+                // Recuperer le nom du jeu depuis les assets
+                let gameName = '';
+                const assetId = listing.asset && listing.asset.id;
+                const assetAppid = listing.asset && String(listing.asset.appid);
+                const assetContextid = listing.asset && String(listing.asset.contextid);
+                if (assetId && assetAppid && assetContextid && data.assets && data.assets[assetAppid] && data.assets[assetAppid][assetContextid]) {
+                    const assetData = data.assets[assetAppid][assetContextid][assetId];
+                    if (assetData) {
+                        let gameTag = (assetData.tags || []).find(t => t.category === 'Game' || t.category_name === 'Jeu');
+                        if (gameTag) {
+                            gameName = gameTag.name;
+                        } else {
+                            gameName = (assetData.type || '').replace(/^(carte à échanger de|trading card from)\s+/i, '').trim();
+                        }
+                    }
+                }
+
+                if (isSteamEvent(appid, gameName)) continue;
+
+                // Enregistrer le badge appid si nouveau
+                upsertBadgeAppid(appid, gameName, false);
+
+                // Mettre a jour lasttrade
+                const existingGame = getGame(appid);
+                const prevLasttrade = existingGame?.lasttrade || 0;
+                if (!prevLasttrade || prevLasttrade < timestamp) {
+                    upsertGame(appid, {
+                        ...(existingGame || {}),
+                        appid: String(appid),
+                        gamename: gameName,
+                        lasttrade: timestamp,
+                    });
+                    updatedAppIds.add(String(appid));
+                    ES_log(`[syncSteamMarketHistory] -> ${gameName} (${appid}) lasttrade mis a jour`);
+                }
+            }
+
+            ES_log(`[syncSteamMarketHistory] ${newCount} nouvelle(s) transaction(s) traitee(s) sur cette page.`);
+
+            // Mise a jour du curseur global (premiere page uniquement, evenement le plus recent)
+            if (start === 0 && sortedEvents.length > 0) {
+                const latestTs = sortedEvents[0].time_event * 1000 + Math.floor((sortedEvents[0].time_event_fraction || 0) / 1e6);
+                if (latestTs > 0) {
+                    setMeta('lastmarkettrade', String(latestTs));
+                    ES_log(`[syncSteamMarketHistory] Curseur lastmarkettrade mis a jour: ${latestTs} (${new Date(latestTs).toLocaleString()})`);
+                }
+            }
+
+            if (shouldStop || start + COUNT >= (data.total_count || 0)) {
+                ES_log(`[syncSteamMarketHistory] Synchronisation terminee. ${updatedAppIds.size} jeu(x) a re-scanner.`);
+                break;
+            }
+
+            start += COUNT;
+            await sleep(500); // Anti-rate-limit
+        } catch (e) {
+            console.error('[syncSteamMarketHistory] Erreur:', e);
+            break;
+        }
+    }
+
+    // Nouvelles transactions detectees : le cache inventaire est obsolete
+    if (updatedAppIds.size > 0) {
+        invalidateInventoryCache();
+    }
+    return Array.from(updatedAppIds);
+}
+
 // --- STEAM COMMUNITY MARKET PRICE HISTORY ---
 
 /**

@@ -1,5 +1,5 @@
 import { sleep, isSteamEvent, ES_log, getSteamProfilePath, setSteamCookie, getSteamCookie, httpGet } from './utils.js';
-import { getPageAppids, getAllPagesAppids, fetchSteamData, syncSteamInventoryHistory, invalidateBadgePagesCache, invalidateInventoryCache } from './steam.js';
+import { getPageAppids, getAllPagesAppids, fetchSteamData, syncSteamInventoryHistory, syncSteamMarketHistory, invalidateBadgePagesCache, invalidateInventoryCache } from './steam.js';
 import { fetchSCEFresh, fetchSCEGlobalInfo, isSCEBusy, resetCreditFlag } from './sce.js';
 import { analyzeBadgeStatus } from './analyze.js';
 import { getAllBadgeAppids, getIncompleteBadgeAppids, getGame, purgeCache, getMeta, setMeta, isDBEmpty, countGames } from './db.js';
@@ -311,9 +311,10 @@ export async function mainWorkflow(profileLink = null) {
     if (isDBEmpty()) {
         console.log('Base de donnees vide. Lancement du scan complet...');
 
-        // 1. Synchroniser l historique des trades en premier
-        console.log('1. Synchronisation de l historique des trades...');
+        // 1. Synchroniser l historique des trades et du marche en premier
+        console.log('1. Synchronisation de l historique des trades et du marche...');
         await syncSteamInventoryHistory(pl);
+        await syncSteamMarketHistory(pl);
 
         // 2. Recuperer les appids depuis TOUTES les pages de badges (p=1..N)
         console.log('2. Recuperation des appids depuis toutes les pages de badges...');
@@ -357,7 +358,9 @@ export async function mainWorkflow(profileLink = null) {
         console.log(`\n--- Cycle ${cycle} [${now}] ---`);
 
         try {
-            const updatedAppIds = await syncSteamInventoryHistory(pl);
+            const tradeUpdated = await syncSteamInventoryHistory(pl);
+            const marketUpdated = await syncSteamMarketHistory(pl);
+            const updatedAppIds = [...new Set([...(tradeUpdated || []), ...(marketUpdated || [])])];
 
             // Badges differes au cycle precedent (file SCE saturee:
             // waitTime > 1 min et pendingOffers > 10): nouvel essai

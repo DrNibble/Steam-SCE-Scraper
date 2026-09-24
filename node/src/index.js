@@ -41,9 +41,10 @@ async function main() {
                     const cookies = await getSteamCookies(process.env.STEAM_AUTH_METHOD || 'auto');
                     setSteamCookie(cookies);
                 }
-                const { syncSteamInventoryHistory } = await import('./steam.js');
+                const { syncSteamInventoryHistory, syncSteamMarketHistory } = await import('./steam.js');
                 console.log('Synchronisation unique de l historique...');
                 await syncSteamInventoryHistory(getSteamProfilePath());
+                await syncSteamMarketHistory(getSteamProfilePath());
                 console.log('Termine.');
             }
             break;
@@ -89,13 +90,14 @@ async function main() {
         case '--history':
         case 'history':
             {
-                const { syncSteamInventoryHistory } = await import('./steam.js');
+                const { syncSteamInventoryHistory, syncSteamMarketHistory } = await import('./steam.js');
                 // Authentification necessaire pour Steam
                 if (!getSteamCookie()) {
                     const cookies = await getSteamCookies(process.env.STEAM_AUTH_METHOD || 'auto');
                     setSteamCookie(cookies);
                 }
                 await syncSteamInventoryHistory(getSteamProfilePath());
+                await syncSteamMarketHistory(getSteamProfilePath());
                 console.log('Historique synchronise.');
             }
             break;
