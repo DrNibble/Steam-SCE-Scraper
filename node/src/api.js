@@ -65,7 +65,9 @@ function cardRowToApi(row) {
         qty: row.qty || 0,
         index: row.card_index,
         inv,
-        hash: row.hash,
+        // Nettoyage du suffixe " (Trading Card)" uniquement a l'affichage
+        // (le hash en DB reste brut, avec le suffixe, pour les appels API Steam Market)
+        hash: row.hash ? row.hash.replace(/\s*\(trading card\)\s*/gi, '').trim() : null,
         iconUrl: row.icon_url,
         artUrl: row.art_url,
         'sce stock': row.sce_stock || 0,
