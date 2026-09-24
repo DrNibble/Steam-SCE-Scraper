@@ -714,6 +714,79 @@ ES_log("[getPageAppids] Entrée fonction");
         return div; // On retourne l'élément pour pouvoir y ajouter des events (onclick)
     }
 
+    // --- MARKET LISTING INFO (same-origin fetch sur steamcommunity.com) ---
+    // Cache en mémoire pour éviter les re-fetchs sur la même page
+    win.ES._listingCache = {};
+
+    /**
+     * Récupère les infos de vente/achat depuis la page listing Steam.
+     * Utilise fetch() same-origin (le script tourne sur steamcommunity.com).
+     * @param {string} marketHashName - Le market_hash_name (ex: "585360-Gregory (Trading Card)")
+     * @returns {Promise<object|null>} - { sellQty, sellPriceEur, buyQty, buyPriceEur }
+     */
+    win.ES.fetchListingInfo = async function(marketHashName) {
+        if (!marketHashName) return null;
+
+        // Cache: ne re-fetch pas si déjà récupéré
+        if (win.ES._listingCache[marketHashName]) {
+            return win.ES._listingCache[marketHashName];
+        }
+
+        try {
+            const url = `https://steamcommunity.com/market/listings/753/${encodeURIComponent(marketHashName)}`;
+            const res = await fetch(url, {
+                credentials: 'same-origin',
+                headers: { 'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7' },
+            });
+            if (!res.ok) return null;
+            const html = await res.text();
+
+            // Strip HTML tags
+            const text = html
+                .replace(/<[^>]+>/g, ' ')
+                .replace(/&nbsp;/g, ' ')
+                .replace(/&#8364;/g, '€')
+                .replace(/&euro;/g, '€')
+                .replace(/\s+/g, ' ');
+
+            // Parse sell: "10 à vendre à partir de €0,97" ou "10 for sale starting at €0.97"
+            const sellMatch = text.match(/(\d[\d\s]*)\s+(?:à vendre|for sale)[^€]*€([\d.,]+)/i);
+            // Parse buy: "7 demandes d'achat à €0,09 ou moins" ou "7 buy orders at €0.09 or lower"
+            const buyMatch = text.match(/(\d[\d\s]*)\s+(?:demandes d'achat|buy orders)[^€]*€([\d.,]+)/i);
+
+            const result = {
+                sellQty: sellMatch ? parseInt(sellMatch[1].replace(/\s/g, ''), 10) : null,
+                sellPriceEur: sellMatch ? parseFloat(sellMatch[2].replace(',', '.')) : null,
+                buyQty: buyMatch ? parseInt(buyMatch[1].replace(/\s/g, ''), 10) : null,
+                buyPriceEur: buyMatch ? parseFloat(buyMatch[2].replace(',', '.')) : null,
+            };
+
+            win.ES._listingCache[marketHashName] = result;
+            ES_log(`[fetchListingInfo] ${marketHashName} → sell: ${result.sellQty != null ? result.sellQty : 'N/A'} @ ${result.sellPriceEur != null ? result.sellPriceEur + '€' : 'N/A'} | buy: ${result.buyQty != null ? result.buyQty : 'N/A'} @ ${result.buyPriceEur != null ? result.buyPriceEur + '€' : 'N/A'}`);
+            return result;
+        } catch (e) {
+            ES_log(`[fetchListingInfo] Erreur pour ${marketHashName}: ${e.message}`);
+            return null;
+        }
+    };
+
+    /**
+     * Formate les infos marché pour l'affichage.
+     * @param {object} info - { sellQty, sellPriceEur, buyQty, buyPriceEur }
+     * @returns {string} - ex: "sell: 10 @ 0.97€ | buy: 7 @ 0.09€"
+     */
+    win.ES.formatMarketInfo = function(info) {
+        if (!info) return '';
+        const parts = [];
+        if (info.sellQty != null && info.sellPriceEur != null) {
+            parts.push(`sell: ${info.sellQty} @ ${info.sellPriceEur}€`);
+        }
+        if (info.buyQty != null && info.buyPriceEur != null) {
+            parts.push(`buy: ${info.buyQty} @ ${info.buyPriceEur}€`);
+        }
+        return parts.join(' | ');
+    };
+
     win.ES.injectQuickTradeButtons = function(appId) {
         const gameData = win.ES.DATA[appId];
         if (!gameData || !gameData.cards) return;
@@ -794,6 +867,54 @@ ES_log("[getPageAppids] Entrée fonction");
 
             const clearDiv = titleEl.querySelector('div[style*="clear"]');
             if (clearDiv && clearDiv.parentNode) clearDiv.parentNode.removeChild(clearDiv);
+
+            // --- MARKET INFO dans .game_card_hover ---
+            if (cardInfo) {
+                const hoverDiv = block.querySelector(".game_card_hover");
+                if (hoverDiv && !hoverDiv.querySelector(".es-market-info")) {
+                    const marketDiv = document.createElement('div');
+                    marketDiv.className = "es-market-info";
+                    marketDiv.style.cssText = `
+                        position: absolute;
+                        bottom: 4px;
+                        left: 4px;
+                        right: 4px;
+                        font-size: 10px;
+                        color: #ebebeb;
+                        background: rgba(0,0,0,0.7);
+                        padding: 2px 4px;
+                        border-radius: 2px;
+                        pointer-events: none;
+                        white-space: nowrap;
+                        overflow: hidden;
+                        text-overflow: ellipsis;
+                    `;
+                    marketDiv.innerText = "⏳ market...";
+                    hoverDiv.style.position = "relative";
+                    hoverDiv.appendChild(marketDiv);
+
+                    // Données API (si disponibles)
+                    const apiInfo = {};
+                    if (cardInfo.steamMarketSellQty != null) apiInfo.sellQty = cardInfo.steamMarketSellQty;
+                    if (cardInfo.steamMarketSellPriceEur != null) apiInfo.sellPriceEur = cardInfo.steamMarketSellPriceEur;
+                    if (cardInfo.steamMarketBuyOrderQty != null) apiInfo.buyQty = cardInfo.steamMarketBuyOrderQty;
+                    if (cardInfo.steamMarketBuyOrderEur != null) apiInfo.buyPriceEur = cardInfo.steamMarketBuyOrderEur;
+
+                    const hasApiData = Object.keys(apiInfo).length >= 2;
+                    if (hasApiData) {
+                        const txt = win.ES.formatMarketInfo(apiInfo);
+                        marketDiv.innerText = txt || "market N/A";
+                    } else if (cardInfo.hash) {
+                        // Fallback: fetch listing page (same-origin)
+                        win.ES.fetchListingInfo(cardInfo.hash).then(info => {
+                            const txt = win.ES.formatMarketInfo(info);
+                            marketDiv.innerText = txt || "market N/A";
+                        });
+                    } else {
+                        marketDiv.innerText = "market N/A";
+                    }
+                }
+            }
         });
 
         // --- 2. GESTION DU BOUTON (LISTE DU BAS) ---

@@ -74,8 +74,13 @@ function cardRowToApi(row) {
         'sce marketPriceUSD': row.sce_market_price_usd || 0,
         'sce quick-trade': row.sce_quick_trade || '',
         steamMarketPriceEur: row.steam_market_price_eur ?? null,
+        steamMarketLastSalePriceEur: row.steam_market_last_sale_price_eur ?? null,
         steamMarketSales7d: row.steam_market_sales_7d || 0,
         steamMarketFetchedAt: row.steam_market_fetched_at ?? null,
+        steamMarketSellPriceEur: row.steam_market_sell_price_eur ?? null,
+        steamMarketSellQty: row.steam_market_sell_qty ?? null,
+        steamMarketBuyOrderEur: row.steam_market_buy_order_eur ?? null,
+        steamMarketBuyOrderQty: row.steam_market_buy_order_qty ?? null,
     };
 }
 
