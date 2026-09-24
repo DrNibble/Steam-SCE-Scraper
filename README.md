@@ -12,7 +12,7 @@ steam-sce/
 │   └── src/
 │       ├── db.js          # Couche SQLite (schema, CRUD, migrations)
 │       ├── utils.js       # Utilitaires (HTTP, clean, isSteamEvent, etc.)
-│       ├── steam.js       # Scraping Steam (badges, inventaire, historique trades)
+│       ├── steam.js       # Scraping Steam (badges, inventaire, historique trades + marché)
 │       ├── sce.js         # Scraping Steam Card Exchange (prix, stock, credits, refresh periodique)
 │       ├── market.js       # Prix marché Steam (page listing + cache SSR, orderbook, pricehistory, buy orders)
 │       ├── ssrCache.js     # Parsing du cache SSR React Query de la page listing (helpers purs)
@@ -80,7 +80,7 @@ Ce mode :
 1. Si la BD est vide : lance le scan complet (badges toutes pages + cartes + SCE, voir [Synchronisation en 2 phases](#synchronisation-des-badges-2-phases))
 2. Si la BD est remplie : passe directement en mode surveillance (un scan complet part dès le premier cycle)
 3. En mode surveillance :
-   - `syncSteamInventoryHistory` toutes les **5 minutes** (les badges differes par le bot SCE sont retentes a chaque cycle, avec re-scan cible des jeux touches par des trades)
+   - `syncSteamInventoryHistory` + `syncSteamMarketHistory` toutes les **5 minutes** (les badges differes par le bot SCE sont retentes a chaque cycle, avec re-scan cible des jeux touches par des trades ou transactions marche)
    - scan complet des badges (toutes les pages, phases 1 + 2, comme `npm run sync:badges`) toutes les **15 minutes** - le re-scan cible est skippe sur ces cycles car le scan complet couvre deja ces appids. Lors de ce scan, l'option `refetchCrafted` est activee : les badges deja craftes (`badge_crafted = 1`) sont re-verifies systematiquement (voir [Caches anti rate-limit](#caches-anti-rate-limit-steam))
 
 ### Scanner un appid specifique
@@ -89,17 +89,21 @@ Ce mode :
 npm run sync:gamecards 485450
 ```
 
-### Synchroniser uniquement l'historique des trades
+### Synchroniser l'historique des trades et du marche
 
 ```bash
 npm run sync:history
 ```
+
+Synchronise a la fois l'historique des trades (`/inventoryhistory/`) et l'historique des transactions du marche (`/market/myhistory/render/`).
 
 ### Synchroniser une seule fois (sans boucle)
 
 ```bash
 npm run -- --sync-once
 ```
+
+Synchronise une fois l'historique des trades et du marche (sans boucle de surveillance).
 
 ### Re-scanner tous les badges connus
 
@@ -193,10 +197,57 @@ Tous les appels vers steamcommunity.com sont mis en cache (constantes `STEAM_CAC
 | Inventaire `753_6` (`fetchInventory`) | memoire, partage entre taches du cycle (singleflight) | 5 min |
 | Prix marche (priceoverview, orderbook, pricehistory) | DB (`cards.steam_market_fetched_at`) | 24h (voir [Limite 24h](#limite-24h-des-prix-marche)) |
 | `inventoryhistory` (`syncSteamInventoryHistory`) | aucun | - |
+| `market/myhistory/render` (`syncSteamMarketHistory`) | aucun | - |
 
-**Invalidation** : des qu un nouveau trade est detecte (`syncSteamInventoryHistory`), le cache inventaire est invalide et les jeux concernes sont re-scannes en force (`forceSteam: true`), donc la fraicheur des donnees apres un trade est preservee.
+**Invalidation** : des qu un nouveau trade ou une transaction de marche est detecte (`syncSteamInventoryHistory` ou `syncSteamMarketHistory`), le cache inventaire est invalide et les jeux concernes sont re-scannes en force (`forceSteam: true`), donc la fraicheur des donnees apres un trade ou une vente marche est preservee.
 
 **Bypass** : les commandes manuelles contournent ces TTL - `npm run sync:badges`, `npm run sync:gamecards <appid>`, `npm run -- --scan-all` et `npm run -- --refetch-cards` passent `forceSteam: true`. Le scan complet automatique du daemon (15 min) utilise les TTL : en pratique les donnees Steam sont re-fetchees toutes les 30 min et les pages de badges toutes les heures. Toutefois, le daemon active l'option `refetchCrafted` qui bypass specifiquement le skip de `badge_crafted = 1` : les badges deja craftes sont re-verifies a chaque scan complet (la page gamecards est re-fetchee), contrairement au comportement par defaut qui les skippe (un badge crafte ne disparait pas).
+
+## Historique des transactions du marché (`syncSteamMarketHistory`)
+
+Steam sépare l'historique des trades (`/inventoryhistory/`) et l'historique des transactions du marché (`/market/myhistory/render/`). La fonction `syncSteamMarketHistory` complète `syncSteamInventoryHistory` en détectant les ventes et achats de cartes sur le Community Market.
+
+### Endpoint
+
+```
+GET https://steamcommunity.com/market/myhistory/render/?query=&start=0&count=500&norender=1
+```
+
+- `norender=1` retourne du JSON (pas de HTML rendu)
+- `count` max 500, pagination par offset (`start` incrémenté de 500)
+- Nécessite les cookies Steam (session authentifiée)
+
+### Structure de la réponse JSON
+
+La réponse contient 4 objets liés :
+
+| Objet | Clé | Champs clés |
+|-------|-----|------------|
+| `events` | tableau | `listingid`, `purchaseid`, `event_type` (3=vente, 4=achat), `time_event` (Unix s), `time_event_fraction` |
+| `listings` | `listingid` | `publisher_fee_app` (appid du jeu), `asset` ({appid, contextid, id}) |
+| `purchases` | `listingid_purchaseid` | `asset` ({appid, classid, instanceid}), `paid_amount`, `paid_fee`, `time_sold` |
+| `assets` | `appid[contextid][assetid]` | `name`, `market_hash_name`, `type`, `tags` |
+
+### Résolution de l'appid
+
+L'appid du jeu est résolu en cascade :
+
+1. `listings[listingid].publisher_fee_app` (le plus fiable pour les cartes)
+2. `asset.market_fee_app` si présent
+3. Préfixe numérique du `market_hash_name` (ex: `1021770-Card Name` → `1021770`)
+4. Si seul 753 (Steam) est résolu, la transaction est ignorée
+
+### Curseur séparé
+
+`syncSteamMarketHistory` utilise un curseur dédié (`lastmarkettrade` dans la table `meta`) pour éviter les conflits avec `lasttrade` utilisé par `syncSteamInventoryHistory`. Les deux fonctions sont appelées à chaque cycle de 5 minutes et leurs appids sont fusionnés :
+
+```js
+const tradeUpdated = await syncSteamInventoryHistory(pl);
+const marketUpdated = await syncSteamMarketHistory(pl);
+const updatedAppIds = [...new Set([...(tradeUpdated || []), ...(marketUpdated || [])])];
+```
+
+Comme pour `syncSteamInventoryHistory`, les nouvelles transactions détectées invalident le cache inventaire et déclenchent un re-scan ciblé des jeux concernés.
 
 ## Worker de marché temps réel
 
@@ -261,10 +312,10 @@ npm run -- --market stats
 ### Intégration avec le mode daemon
 
 Le mode `npm run sync` démarre automatiquement le worker de marché en arrière-plan. Dans la boucle de surveillance :
-1. `syncSteamInventoryHistory` détecte les trades récents toutes les 5 min
-2. Les jeux avec trades sont re-scannés (`processQueue` avec délai réduit à 500ms) hors cycles de scan complet
+1. `syncSteamInventoryHistory` + `syncSteamMarketHistory` detectent les trades et transactions de marche toutes les 5 min. Les appids des deux sources sont fusionnes pour le re-scan cible
+2. Les jeux avec trades/transactions sont re-scannes (`processQueue` avec delai reduit a 500ms) hors cycles de scan complet
 3. Un scan complet des badges (toutes les pages, 2 phases) tourne toutes les 15 min
-4. Les cartes stale (> 24h) sont enfilées pour le worker de fond
+4. Les cartes stale (> 24h) sont enfilees pour le worker de fond
 5. Le worker refresh les prix en continu avec le token bucket, dans la limite d'un fetch par 24h et par carte
 
 ### Lancer le front-end PHP
@@ -301,7 +352,7 @@ La base `data/es_cache.sqlite` contient 5 tables :
 
 | Table | Description |
 |-------|-------------|
-| `meta` | Cles-valeurs globales (scecredit, scePendingOffers, sceWaitTime, lasttrade, sceDeferredAppids, usdToEur, usdToEurFetchedAt) |
+| `meta` | Cles-valeurs globales (scecredit, scePendingOffers, sceWaitTime, lasttrade, lastmarkettrade, sceDeferredAppids, usdToEur, usdToEurFetchedAt) |
 | `games` | Un jeu par appid (gamename, disabled, fetched_at, set_cards, badge_crafted, indicateurs de completion) |
 | `cards` | Cartes individuelles par jeu (nom, hash, qty, inventaire, stock SCE, prix gamepage SCE USD, prix marché: vente + volume, buy order + volume, volume 7j, dernière vente 7j) |
 | `badge_appids` | AppIDs decouverts sur la page badges (cache de decouverte) |
@@ -466,7 +517,7 @@ Le serveur est bind sur `127.0.0.1` par defaut : les donnees ne sont pas exposee
 
 ## Workflow
 
-1. Le scraper Node.js recupere les donnees Steam (badges toutes pages, inventaire, historique) et SCE (prix, stock, prix gamepage USD)
+1. Le scraper Node.js recupere les donnees Steam (badges toutes pages, inventaire, historique trades + marche) et SCE (prix, stock, prix gamepage USD)
 2. Les donnees sont stockees dans SQLite (phase 1 : inventaire SCE, phase 2 : prix marche)
 3. Le worker de marche recupere les prix (token bucket, file prioritaire, au plus 1 fetch par carte et par 24h)
 4. Le serveur API expose les donnees en lecture seule pour le script Tampermonkey
@@ -476,13 +527,13 @@ Le serveur est bind sur `127.0.0.1` par defaut : les donnees ne sont pas exposee
 
 | Commande | Description |
 |----------|-------------|
-| `npm run sync` | Mode daemon (tradehistory 5 min, scan complet 15 min, worker marché) |
+| `npm run sync` | Mode daemon (tradehistory + marché 5 min, scan complet 15 min, worker marché) |
 | `npm run login` | Authentification Steam (mot de passe ou QR code) |
 | `npm run login:qr` | Authentification Steam via QR code |
 | `npm run login:password` | Authentification Steam via mot de passe |
 | `npm run sync:badges` | Force le scan complet de tous les badges (toutes les pages, 2 phases) |
 | `npm run sync:gamecards <appid>` | Scanne un appid specifique |
-| `npm run sync:history` | Synchronise l'historique des trades |
+| `npm run sync:history` | Synchronise l'historique des trades et du marché |
 | `npm run init-db` | Initialise la base SQLite |
 | `npm run api` | Démarre le serveur API REST (lecture seule de la DB) |
 | `npm run market` | Démarre le worker de marché temps réel |
@@ -490,7 +541,7 @@ Le serveur est bind sur `127.0.0.1` par defaut : les donnees ne sont pas exposee
 | `npm run -- --market price <hash>` | Prix en cache d'une carte |
 | `npm run -- --market refresh <hash>` | Force le refresh d'une carte |
 | `npm run -- --market enqueue` | Enfiler les cartes stale pour refresh |
-| `npm run -- --sync-once` | Synchronise une fois l'historique (sans boucle) |
+| `npm run -- --sync-once` | Synchronise une fois l'historique des trades et du marché (sans boucle) |
 | `npm run -- --purge` | Purge le cache complet |
 | `npm run -- --scan-all` | Re-scanne tous les badges connus |
 | `npm run -- --refetch-cards` | Re-fetch les cartes Steam (sans SCE) |
