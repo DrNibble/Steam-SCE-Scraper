@@ -36,7 +36,8 @@
     // Le serveur API tourne sur le backend Node.js (npm run api ou integre au daemon npm run sync)
     // Modifiez API_BASE_URL si votre serveur tourne sur un autre hote/port
     const API_BASE_URL = 'http://127.0.0.1';
-    const API_BASE_PORT = '3001'
+    const API_BASE_PORT = '3001';
+    const WEB_BASE_PORT = '8080';
 
     // Initialisation de la structure de données
     win.ES = win.ES || {};
@@ -507,7 +508,7 @@ ES_log("[getPageAppids] Entrée fonction");
         // --- 2. BOUTON RAPPORT (front-end PHP localhost:8080) ---
         const reportBtn = document.createElement("a");
         reportBtn.id = "es-report-btn";
-        reportBtn.href = "http://localhost:8080";
+        reportBtn.href = API_BASE_URL + ':' + WEB_BASE_PORT; //"http://localhost:8080";
         reportBtn.target = "_blank";
         reportBtn.className = "btn_grey_black btn_small_thin";
         reportBtn.style.margin = "5px";
