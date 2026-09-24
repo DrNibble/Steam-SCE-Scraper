@@ -827,12 +827,13 @@ ES_log("[getPageAppids] Entrée fonction");
 
             // --- MARKET INFO dans .game_card_ctn (API uniquement, pas de fallback fetch listing) ---
             if (cardInfo) {
-                if (!block.querySelector(".es-market-info")) {
-                    const marketDiv = document.createElement('div');
+                let marketDiv = block.querySelector(".es-market-info");
+                if (!marketDiv) {
+                    marketDiv = document.createElement('div');
                     marketDiv.className = "es-market-info";
                     marketDiv.style.cssText = `
                         position: absolute;
-                        bottom: 4px;
+                        top: 4px;
                         left: 4px;
                         right: 4px;
                         font-size: 10px;
@@ -845,31 +846,33 @@ ES_log("[getPageAppids] Entrée fonction");
                         overflow: hidden;
                         text-overflow: ellipsis;
                     `;
-                    marketDiv.innerText = "⏳ market...";
                     block.style.position = "relative";
                     block.appendChild(marketDiv);
+                }
+                marketDiv.innerText = "⏳ market...";
 
-                    // Données API en priorité; fallback sur sce marketPriceUSD si API indisponible ou vide
-                    const apiInfo = {};
-                    if (cardInfo.steamMarketSellQty != null) apiInfo.sellQty = cardInfo.steamMarketSellQty;
-                    if (cardInfo.steamMarketSellPriceEur != null) apiInfo.sellPriceEur = cardInfo.steamMarketSellPriceEur;
-                    if (cardInfo.steamMarketBuyOrderQty != null) apiInfo.buyQty = cardInfo.steamMarketBuyOrderQty;
-                    if (cardInfo.steamMarketBuyOrderEur != null) apiInfo.buyPriceEur = cardInfo.steamMarketBuyOrderEur;
+                // Données API en priorité; fallback sur sce marketPriceUSD si API indisponible ou vide
+                // (recalculé à chaque passage pour mettre à jour l'affichage une fois les données chargées)
+                const apiInfo = {};
+                if (cardInfo.steamMarketSellQty != null) apiInfo.sellQty = cardInfo.steamMarketSellQty;
+                if (cardInfo.steamMarketSellPriceEur != null) apiInfo.sellPriceEur = cardInfo.steamMarketSellPriceEur;
+                if (cardInfo.steamMarketBuyOrderQty != null) apiInfo.buyQty = cardInfo.steamMarketBuyOrderQty;
+                if (cardInfo.steamMarketBuyOrderEur != null) apiInfo.buyPriceEur = cardInfo.steamMarketBuyOrderEur;
 
-                    const hasApiData = Object.keys(apiInfo).length >= 2;
-                    if (hasApiData) {
-                        const txt = win.ES.formatMarketInfo(apiInfo);
-                        marketDiv.innerText = txt || "market N/A";
+                const hasApiData = Object.keys(apiInfo).length >= 2;
+                if (hasApiData) {
+                    const txt = win.ES.formatMarketInfo(apiInfo);
+                    const sceWorth = cardInfo["sce worth"] ?? 0;
+                    marketDiv.innerText = txt ? `${txt} (${sceWorth}c)` : "market N/A";
+                } else {
+                    // Fallback: prix marché SCE (USD → EUR * 0.92)
+                    const priceUSD = parseFloat(cardInfo["sce marketPriceUSD"]) || 0;
+                    if (priceUSD > 0) {
+                        const priceEUR = Math.round(priceUSD * 0.92 * 100) / 100;
+                        const sceWorth = cardInfo["sce worth"] ?? 0;
+                        marketDiv.innerText = `SCE: ${priceEUR}€ (${sceWorth}c)`;
                     } else {
-                        // Fallback: prix marché SCE (USD → EUR * 0.92)
-                        const priceUSD = parseFloat(cardInfo["sce marketPriceUSD"]) || 0;
-                        if (priceUSD > 0) {
-                            const priceEUR = Math.round(priceUSD * 0.92 * 100) / 100;
-                            const sceWorth = cardInfo["sce worth"] ?? 0;
-                            marketDiv.innerText = `SCE: ${priceEUR}€ (${sceWorth}c)`;
-                        } else {
-                            marketDiv.innerText = "market N/A";
-                        }
+                        marketDiv.innerText = "market N/A";
                     }
                 }
             }
