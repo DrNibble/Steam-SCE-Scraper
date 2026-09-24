@@ -6,7 +6,12 @@
  *   - Si vente dans les 7 derniers jours → dernier prix de vente
  *   - Sinon → buy order le plus haut
  *
- * Endpoints utilisés :
+ * Sources utilisées (dans l'ordre, avec fallback) :
+ *   0. Page listing (/market/listings/753/HASH) — cache SSR embarqué
+ *      contenant les mêmes données que /market/orderbook ET
+ *      /market/pricehistory (voir ssrCache.js). 1 requête remplace 3.
+ *      ⚠ Le cache SSR est ABSENT pour les items à fort volume (page
+ *      coquille) → les endpoints restent indispensables en fallback.
  *   1. /market/priceoverview — prix de vente EUR, prix médian, volume (pas d'auth)
  *   2. /market/orderbook  — buy/sell orders, quantités (pas d'auth requise, mais cookies envoyés)
  *   3. /market/pricehistory — historique des ventes, volume 7j, prix médian 7j (requiert steamLoginSecure)
@@ -20,7 +25,8 @@
  *   - Le hash en DB est déjà le market_hash_name (ex: "616580-Servie")
  *
  * Anti rate-limit :
- *   - 1 requête par endpoint par carte, séquentiel
+ *   - Page listing d'abord (cache SSR = orderbook + pricehistory en 1 requête)
+ *   - Endpoints uniquement en fallback pour les données manquantes
  *   - Le délai fixe est remplacé par le token bucket de marketQueue.js
  *   - Backoff exponentiel sur 429 (déjà géré par httpGet)
  *   - Pas de parallélisme
@@ -28,6 +34,15 @@
 
 import { httpGet, httpGetJSON, sleep, getSteamCookie, ES_log } from './utils.js';
 import { getCards, updateCardMarketPrices } from './db.js';
+import {
+    parseSteamPriceEur,
+    median,
+    parseListingText,
+    parseSSRQueries,
+    findMarketQuery,
+    extractOrderbookInfo,
+    recentSaleFromSSR,
+} from './ssrCache.js';
 
 const STEAM_AJAX_HEADERS = {
     'Referer': 'https://steamcommunity.com/',
@@ -36,41 +51,7 @@ const STEAM_AJAX_HEADERS = {
 
 const MARKET_APPID = 753; // Toujours 753 pour les cartes Steam Community
 
-
-// ═══════════════════════════════════════════════════════════════
-// 0) Utilitaires
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Parse un prix Steam au format EUR (ex: "0,29€", "1 649,53€", "1.649,53€").
- * Retourne un float en EUR, ou null si le parsing échoue.
- */
-function parseSteamPriceEur(priceStr) {
-    if (!priceStr) return null;
-    let s = priceStr.replace(/[^\d.,]/g, ''); // Garder chiffres, points, virgules
-    if (s.includes('.') && s.includes(',')) {
-        // Les deux présents : point = milliers, virgule = décimal
-        s = s.replace(/\./g, '').replace(',', '.');
-    } else if (s.includes(',')) {
-        // Seulement virgule : décimal
-        s = s.replace(',', '.');
-    }
-    const val = parseFloat(s);
-    return isNaN(val) ? null : val;
-}
-
-/**
- * Calcule la médiane d'un tableau de valeurs.
- */
-function median(values) {
-    if (!values || values.length === 0) return null;
-    const sorted = [...values].sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 !== 0
-        ? sorted[mid]
-        : Math.round(((sorted[mid - 1] + sorted[mid]) / 2) * 100) / 100;
-}
-
+// (parseSteamPriceEur et median sont importés depuis ssrCache.js)
 
 // ═══════════════════════════════════════════════════════════════
 // 1) Price Overview — prix de vente EUR, prix médian, volume (pas d'auth)
@@ -214,25 +195,31 @@ export async function getOrderbook(marketHashName) {
 
 
 // ═══════════════════════════════════════════════════════════════
-// 2b) Listing page — parse HTML pour sell/buy orders en EUR (pas d'API)
+// 2b) Listing page — cache SSR (orderbook + pricehistory) + texte visible
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Récupère les informations de vente et d'achat depuis la page listing Steam.
+ * Récupère les données de marché depuis la page listing Steam (1 requête).
  *
- * La page listing (https://steamcommunity.com/market/listings/753/HASH) contient
- * des spans avec des classes dynamiques (React) affichant:
- *   - "10 à vendre à partir de €0,97" (FR) / "10 for sale starting at €0.97" (EN)
- *   - "7 demandes d'achat à €0,09 ou moins" (FR) / "7 buy orders at €0.09 or lower" (EN)
+ * La page listing embarque — quand le SSR réussit — un cache React Query
+ * contenant les réponses des endpoints /market/orderbook et
+ * /market/pricehistory (voir ssrCache.js). Le texte visible
+ * ("X à vendre à partir de €Y", "Z demandes d'achat à €W") sert de
+ * complément / fallback.
  *
- * Avantage: les prix sont en EUR directement (pas de conversion USD → EUR).
- * Inconvénient: parse HTML (les classes CSS changent à chaque build Steam).
- * On utilise donc regex sur le texte débarrassé des tags HTML.
+ * IMPORTANT : le cache SSR n'est PAS toujours présent. Pour les items à
+ * fort volume de ventes, Steam sert une coquille vide ("Failed to load
+ * item description") : orderbook/pricehistory/text valent alors null et
+ * les endpoints restent nécessaires en fallback.
  *
  * @param {string} marketHashName - Le market_hash_name (ex: "585360-Gregory (Trading Card)")
- * @returns {Promise<object|null>} - { sellQty, sellPriceEur, buyQty, buyPriceEur } ou null
+ * @returns {Promise<object|null>} - { orderbook, pricehistory, text, ssrAvailable } ou null
+ *   - orderbook: data market.orderbook du cache SSR (prix en centimes) ou null
+ *   - pricehistory: data market.pricehistory du cache SSR ou null
+ *   - text: { sellQty, sellPriceEur, buyQty, buyPriceEur } ou null
+ *   - ssrAvailable: true si au moins un des caches SSR était présent
  */
-export async function getListingPageInfo(marketHashName) {
+export async function getListingPageData(marketHashName) {
     const url = `https://steamcommunity.com/market/listings/${MARKET_APPID}/${encodeURIComponent(marketHashName)}`;
 
     try {
@@ -245,36 +232,37 @@ export async function getListingPageInfo(marketHashName) {
             },
         });
 
-        // Strip HTML tags pour obtenir du texte brut
-        const text = html
-            .replace(/<[^>]+>/g, ' ')
-            .replace(/&nbsp;/g, ' ')
-            .replace(/&#8364;/g, '€')
-            .replace(/&euro;/g, '€')
-            .replace(/\s+/g, ' ');
+        // 1. Cache SSR (primaire) : orderbook + pricehistory embarqués
+        const queries = parseSSRQueries(html);
+        const orderbook = queries ? findMarketQuery(queries, 'orderbook') : null;
+        const pricehistory = queries ? findMarketQuery(queries, 'pricehistory') : null;
 
-        // Parse sell orders: "10 à vendre à partir de €0,97" ou "10 for sale starting at €0.97"
-        // Le volume peut contenir des espaces (ex: "1 649")
-        const sellMatch = text.match(/(\d[\d\s]*)\s+(?:à vendre|for sale)[^€]*€([\d.,]+)/i);
+        // 2. Texte visible (complément / fallback)
+        const text = parseListingText(html);
 
-        // Parse buy orders: "7 demandes d'achat à €0,09 ou moins" ou "7 buy orders at €0.09 or lower"
-        const buyMatch = text.match(/(\d[\d\s]*)\s+(?:demandes d'achat|buy orders)[^€]*€([\d.,]+)/i);
+        const ssrAvailable = !!(orderbook || pricehistory);
+        ES_log(`[getListingPageData] ${marketHashName} → SSR: ${ssrAvailable ? 'oui' : 'non'} (orderbook: ${orderbook ? 'oui' : 'non'}, pricehistory: ${pricehistory ? 'oui' : 'non'}) | texte: ${text ? 'oui' : 'non'}`);
 
-        const sellQty = sellMatch ? parseInt(sellMatch[1].replace(/\s/g, ''), 10) : null;
-        const sellPriceEur = sellMatch ? parseSteamPriceEur('€' + sellMatch[2]) : null;
-        const buyQty = buyMatch ? parseInt(buyMatch[1].replace(/\s/g, ''), 10) : null;
-        const buyPriceEur = buyMatch ? parseSteamPriceEur('€' + buyMatch[2]) : null;
-
-        ES_log(`[getListingPageInfo] ${marketHashName} → sell: ${sellQty != null ? sellQty : 'N/A'} @ ${sellPriceEur != null ? sellPriceEur + '€' : 'N/A'} | buy: ${buyQty != null ? buyQty : 'N/A'} @ ${buyPriceEur != null ? buyPriceEur + '€' : 'N/A'}`);
-
-        return { sellQty, sellPriceEur, buyQty, buyPriceEur };
+        return { orderbook, pricehistory, text, ssrAvailable };
     } catch (err) {
         if (err.message && err.message.includes('429')) {
             throw err;
         }
-        ES_log(`[getListingPageInfo] Erreur pour ${marketHashName}: ${err.message}`);
+        ES_log(`[getListingPageData] Erreur pour ${marketHashName}: ${err.message}`);
         return null;
     }
+}
+
+/**
+ * Récupère les informations de vente et d'achat depuis la page listing Steam.
+ *
+ * @deprecated Utiliser getListingPageData (cache SSR + texte, 1 requête pour tout).
+ * @param {string} marketHashName - Le market_hash_name (ex: "585360-Gregory (Trading Card)")
+ * @returns {Promise<object|null>} - { sellQty, sellPriceEur, buyQty, buyPriceEur } ou null
+ */
+export async function getListingPageInfo(marketHashName) {
+    const data = await getListingPageData(marketHashName);
+    return data ? data.text : null;
 }
 
 
@@ -411,11 +399,26 @@ export async function getRecentSale(marketHashName, days = 7) {
 /**
  * Résout le prix d'une carte selon la logique :
  *   - Si vente dans les 7 derniers jours → dernier prix de vente (EUR)
- *   - Sinon → buy order le plus haut (converti en EUR approximatif)
+ *   - Sinon → buy order le plus haut (EUR direct si possible)
+ *
+ * Stratégie anti rate-limit (SSR first, endpoints en fallback) :
+ *   1. Page listing (1 requête) : cache SSR = orderbook + pricehistory
+ *      complets + texte visible (sell/buy orders en EUR direct)
+ *   2. Endpoint /market/pricehistory UNIQUEMENT si le cache SSR
+ *      pricehistory est absent (ou dans une devise non-EUR)
+ *   3. Endpoint /market/orderbook UNIQUEMENT si ni le texte ni le cache
+ *      SSR n'ont fourni de buy order
+ *
+ * Règles importantes :
+ *   - Cache SSR pricehistory PRÉSENT sans vente dans la fenêtre = donnée
+ *     autoritaire → PAS d'appel endpoint (ça ne servirait à rien)
+ *   - Les prix du cache SSR ne sont utilisés en EUR que si la devise
+ *     est l'EUR (ecurrency/eCurrency === 3) ; sinon fallback endpoint
+ *   - Les quantités du cache SSR sont indépendantes de la devise
  *
  * @param {object} card - Objet carte depuis la DB (doit avoir .hash)
  * @param {number} days - Fenêtre en jours (défaut: 7)
- * @returns {Promise<object>} - { priceEur, sales7d, lastSalePriceEur, source, reason }
+ * @returns {Promise<object>} - { priceEur, sales7d, lastSalePriceEur, source, reason, ... }
  */
 export async function resolveCardPrice(card, days = 7) {
     const marketHashName = card.hash;
@@ -423,50 +426,92 @@ export async function resolveCardPrice(card, days = 7) {
         return { priceEur: null, sales7d: 0, lastSalePriceEur: null, source: 'no_hash', reason: 'Pas de hash' };
     }
 
-    // Étape 1 : Page listing — sell/buy orders en EUR directement (pas de conversion)
-    const listing = await getListingPageInfo(marketHashName);
+    // Étape 1 : page listing (1 requête) — cache SSR + texte visible
+    const listingData = await getListingPageData(marketHashName);
+    const text = listingData?.text ?? null;
+    const ssrOrderbook = extractOrderbookInfo(listingData?.orderbook ?? null);
+    const ssrHistory = listingData?.pricehistory ?? null;
 
-    // Étape 2 : Vérifier l'historique des ventes (requiert auth)
-    const recentSale = await getRecentSale(marketHashName, days);
+    // Sell/buy orders : texte d'abord (EUR direct), puis cache SSR
+    let sellPriceEur = text?.sellPriceEur ?? null;
+    let sellQty = text?.sellQty ?? null;
+    let buyOrderEur = text?.buyPriceEur ?? null;
+    let buyOrderQty = text?.buyQty ?? null;
 
-    // Sell/buy orders depuis la listing page (disponibles dans tous les cas)
-    const sellPriceEur = listing?.sellPriceEur ?? null;
-    const sellQty = listing?.sellQty ?? null;
-    const buyOrderEur = listing?.buyPriceEur ?? null;
-    const buyOrderQty = listing?.buyQty ?? null;
+    if (ssrOrderbook) {
+        if (sellPriceEur === null && ssrOrderbook.sellPriceEur !== null) sellPriceEur = ssrOrderbook.sellPriceEur;
+        if (sellQty === null && ssrOrderbook.sellQty !== null) sellQty = ssrOrderbook.sellQty;
+        if (buyOrderEur === null && ssrOrderbook.buyOrderEur !== null) buyOrderEur = ssrOrderbook.buyOrderEur;
+        if (buyOrderQty === null && ssrOrderbook.buyOrderQty !== null) buyOrderQty = ssrOrderbook.buyOrderQty;
+    }
 
-    if (recentSale) {
-        // Vente trouvée dans les 7 derniers jours → dernier prix de vente
+    // Étape 2 : historique des ventes — cache SSR autoritaire, sinon endpoint
+    let recentSale = null;
+    let ssrVolumeOnly = 0; // volume 7j si SSR présent mais devise inattendue
+    let needHistoryEndpoint = false;
+
+    if (ssrHistory) {
+        const ssrSale = recentSaleFromSSR(ssrHistory, days);
+        if (!ssrSale) {
+            // Aucune vente dans la fenêtre : le cache SSR était présent,
+            // c'est autoritaire → PAS d'appel endpoint
+        } else if (ssrSale.ecurrency === 3) {
+            recentSale = ssrSale;
+        } else {
+            ES_log(`[resolveCardPrice] pricehistory SSR devise=${ssrSale.ecurrency} (3=EUR attendu) pour ${marketHashName} : prix ignorés, fallback endpoint`);
+            ssrVolumeOnly = ssrSale.totalVolume || 0;
+            needHistoryEndpoint = true;
+        }
+    } else {
+        needHistoryEndpoint = true;
+    }
+
+    if (needHistoryEndpoint) {
+        const epSale = await getRecentSale(marketHashName, days);
+        if (epSale) {
+            recentSale = epSale;
+        } else if (ssrVolumeOnly > 0) {
+            // Endpoint échoué : on garde au moins le volume SSR (prix inconnu)
+            recentSale = { price: null, date: null, volume: 0, salesCount: 0, totalVolume: ssrVolumeOnly, medianPrice: null };
+        }
+    }
+
+    const sales7d = recentSale ? (recentSale.totalVolume || 0) : 0;
+    const lastSalePriceEur = recentSale?.price ?? null;
+
+    if (recentSale && lastSalePriceEur !== null) {
+        // Vente trouvée dans la fenêtre → dernier prix de vente
         return {
             priceEur: recentSale.price,
-            sales7d: recentSale.totalVolume || recentSale.salesCount,
-            lastSalePriceEur: recentSale.price,
+            sales7d,
+            lastSalePriceEur,
             sellPriceEur,
             sellQty,
             buyOrderEur,
             buyOrderQty,
             source: 'last_sale',
-            reason: `Vente dans les ${days} derniers jours`,
+            reason: `Vente dans les ${days} derniers jours${listingData?.ssrAvailable ? ' (cache SSR)' : ''}`,
             saleDate: recentSale.date,
         };
     }
 
-    // Pas de vente dans les 7 derniers jours → buy order depuis la listing page (EUR direct)
+    // Pas de vente exploitable dans la fenêtre → buy order le plus haut
     if (buyOrderEur !== null) {
         return {
             priceEur: buyOrderEur,
-            sales7d: 0,
-            lastSalePriceEur: null,
+            sales7d,
+            lastSalePriceEur,
             sellPriceEur,
             sellQty,
             buyOrderEur,
             buyOrderQty,
             source: 'highest_buy_order',
-            reason: 'Aucune vente dans les 7 derniers jours',
+            reason: `Aucune vente dans les ${days} derniers jours`,
         };
     }
 
-    // Fallback : orderbook (USD → EUR approximatif) si la listing page n'a pas marché
+    // Fallback : endpoint orderbook (USD → EUR approximatif) si la page
+    // listing n'a rien donné (ni texte, ni cache SSR utilisable)
     const orderbook = await getOrderbook(marketHashName);
 
     if (orderbook && orderbook.highestBuyOrder) {
@@ -475,12 +520,12 @@ export async function resolveCardPrice(card, days = 7) {
 
         return {
             priceEur,
-            sales7d: 0,
-            lastSalePriceEur: null,
+            sales7d,
+            lastSalePriceEur,
             sellPriceEur,
             sellQty,
             buyOrderEur: priceEur,
-            buyOrderQty: listing?.buyQty ?? null,
+            buyOrderQty: buyOrderQty ?? orderbook.totalBuyOrders ?? null,
             source: 'highest_buy_order',
             reason: 'Aucune vente dans les 7 derniers jours (orderbook fallback)',
             buyOrderUsd: orderbook.highestBuyOrder,
@@ -491,8 +536,8 @@ export async function resolveCardPrice(card, days = 7) {
     // Ni vente ni buy order
     return {
         priceEur: null,
-        sales7d: 0,
-        lastSalePriceEur: null,
+        sales7d,
+        lastSalePriceEur,
         sellPriceEur,
         sellQty,
         buyOrderEur,

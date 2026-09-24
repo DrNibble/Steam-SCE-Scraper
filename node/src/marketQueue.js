@@ -11,7 +11,8 @@
  * Intégration dans Steam-SCE-Scraper :
  *   - Importe depuis utils.js : httpGet, sleep, getSteamCookie, ES_log
  *   - Importe depuis db.js : getDB, updateCardMarketPrice
- *   - Utilise market.js : getOrderbook, getRecentSale
+ *   - Utilise market.js : getListingPageData (cache SSR), getOrderbook,
+ *     getRecentSale, getPriceOverview (fallbacks endpoints)
  *
  * Usage dans sync.js ou index.js :
  *
@@ -39,7 +40,8 @@
 
 import { getDB } from './db.js';
 import { sleep, ES_log } from './utils.js';
-import { getOrderbook, getRecentSale, getPriceOverview, getListingPageInfo, MARKET_PRICE_REFRESH_MS } from './market.js';
+import { getOrderbook, getRecentSale, getPriceOverview, getListingPageData, MARKET_PRICE_REFRESH_MS } from './market.js';
+import { extractOrderbookInfo, recentSaleFromSSR } from './ssrCache.js';
 
 // ═══════════════════════════════════════════════════════════════
 // Configuration du token bucket
@@ -336,10 +338,20 @@ function markQueueItemDoneFresh(item) {
 /**
  * Traite une carte : récupère le prix depuis Steam et met à jour la DB.
  *
- * Stratégie pour minimiser les requêtes :
- *   1. priceoverview (1 req, sans auth) → prix de vente EUR
- *   2. orderbook (1 req, sans auth) → buy order le plus haut
- *   3. pricehistory (1 req, auth) → volume 7j + dernier prix de vente
+ * Stratégie SSR-first pour minimiser les requêtes :
+ *   1. Page listing (1 req) — cache SSR embarqué contenant les mêmes
+ *      données que /market/orderbook ET /market/pricehistory + texte
+ *      visible (sell/buy orders en EUR direct). Voir ssrCache.js.
+ *   2. Endpoints UNIQUEMENT en fallback pour les données manquantes :
+ *      - priceoverview → prix de vente EUR (si absent de la page)
+ *      - orderbook → buy order le plus haut (si absent de la page)
+ *      - pricehistory → volume 7j + dernier prix de vente (si le cache
+ *        SSR pricehistory est absent ou dans une devise non-EUR)
+ *
+ * ⚠ Le cache SSR est absent pour les items à fort volume (page coquille
+ * "Failed to load item description") : les fallbacks endpoints prennent
+ * alors le relais. Cache SSR pricehistory présent sans vente < 7j =
+ * autoritaire → aucun appel endpoint.
  *
  * Garde-fou 24h : une carte déjà fetchée il y a moins de 24h est marquée
  * done sans aucune requête (voir isQueueItemFresh).
@@ -373,58 +385,118 @@ async function processCard(item) {
         let sales7d = 0;              // Volume de vente cumulé sur 7 jours
         let priceEur = null;         // Dernier prix vendu si <7j, sinon buy order
         let lastSalePriceEur = null; // Prix de la derniere vente dans les 7 jours (null si pas de vente)
-        let buyOrderQty = null;      // Nombre de demandes d'achat (listing page)
+        let buyOrderQty = null;      // Nombre de demandes d'achat
 
-        // Étape 1 : priceoverview — prix de vente EUR (pas d'auth)
-        const pov = await getPriceOverview(marketHashName);
-        if (pov) {
-            sellPriceEur = pov.sellPriceEur;
+        // Étape 1 : page listing (1 requête) — cache SSR (orderbook +
+        // pricehistory) + texte visible (sell/buy orders en EUR direct)
+        const listingData = await getListingPageData(marketHashName);
+        const text = listingData?.text ?? null;
+        const ssrOrderbook = extractOrderbookInfo(listingData?.orderbook ?? null);
+        const ssrHistory = listingData?.pricehistory ?? null;
+
+        if (text) {
+            if (text.sellPriceEur != null) sellPriceEur = text.sellPriceEur;
+            if (text.sellQty != null) sellQty = text.sellQty;
+            if (text.buyPriceEur != null) buyOrderEur = text.buyPriceEur;
+            if (text.buyQty != null) buyOrderQty = text.buyQty;
         }
 
-        // Étape 2 : orderbook — buy order, quantités (pas d'auth, USD)
-        const orderbook = await getOrderbook(marketHashName);
-        if (orderbook) {
-            sellQty = orderbook.sellQtyAtLowest || 0;
+        // Complément depuis le cache SSR orderbook : les prix ne sont
+        // exploitables en EUR que si eCurrency === 3 (sinon l'endpoint
+        // orderbook prend le relais), les quantités sont toujours valides
+        if (ssrOrderbook) {
+            if (sellPriceEur === null && ssrOrderbook.sellPriceEur !== null) sellPriceEur = ssrOrderbook.sellPriceEur;
+            if (sellQty === null && ssrOrderbook.sellQty !== null) sellQty = ssrOrderbook.sellQty;
+            if (buyOrderEur === null && ssrOrderbook.buyOrderEur !== null) buyOrderEur = ssrOrderbook.buyOrderEur;
+            if (buyOrderQty === null && ssrOrderbook.buyOrderQty !== null) buyOrderQty = ssrOrderbook.buyOrderQty;
+        }
 
-            // Convertir le buy order USD → EUR en utilisant le ratio du prix de vente
-            if (orderbook.highestBuyOrder) {
-                if (sellPriceEur && orderbook.lowestSellOrder) {
-                    // Ratio : sellPriceEur / sellPriceUsd = taux de change effectif
-                    const exchangeRate = sellPriceEur / orderbook.lowestSellOrder;
-                    buyOrderEur = Math.round(orderbook.highestBuyOrder * exchangeRate * 100) / 100;
-                } else {
-                    // Fallback : taux fixe
-                    const USD_TO_EUR = 0.92;
-                    buyOrderEur = Math.round(orderbook.highestBuyOrder * USD_TO_EUR * 100) / 100;
-                }
+        // Étape 2 : historique des ventes — cache SSR autoritaire,
+        // endpoint pricehistory en fallback
+        let recentSale = null;
+        let ssrVolumeOnly = 0; // volume 7j si SSR présent mais devise inattendue
+        let needHistoryEndpoint = false;
+
+        if (ssrHistory) {
+            const ssrSale = recentSaleFromSSR(ssrHistory, 7);
+            if (!ssrSale) {
+                // Aucune vente < 7j : le cache SSR était présent, c'est
+                // autoritaire → PAS d'appel endpoint
+            } else if (ssrSale.ecurrency === 3) {
+                recentSale = ssrSale;
+            } else {
+                ES_log(`[processCard] pricehistory SSR devise=${ssrSale.ecurrency} (3=EUR attendu) pour ${marketHashName} : prix ignorés, fallback endpoint`);
+                ssrVolumeOnly = ssrSale.totalVolume || 0;
+                needHistoryEndpoint = true;
+            }
+        } else {
+            needHistoryEndpoint = true;
+        }
+
+        if (needHistoryEndpoint) {
+            const epSale = await getRecentSale(marketHashName, 7);
+            if (epSale) {
+                recentSale = epSale;
+            } else if (ssrVolumeOnly > 0) {
+                // Endpoint échoué : on garde au moins le volume SSR (prix inconnu)
+                recentSale = { price: null, date: null, volume: 0, salesCount: 0, totalVolume: ssrVolumeOnly, medianPrice: null };
             }
         }
 
-        // Étape 2b : listing page — sell/buy orders en EUR (plus précis que orderbook USD)
-        const listing = await getListingPageInfo(marketHashName);
-        if (listing) {
-            // Les prix EUR de la page listing sont plus précis que la conversion USD → EUR
-            if (listing.sellPriceEur != null) sellPriceEur = listing.sellPriceEur;
-            if (listing.sellQty != null) sellQty = listing.sellQty;
-            if (listing.buyPriceEur != null) buyOrderEur = listing.buyPriceEur;
-            buyOrderQty = listing.buyQty;
-        }
-
-        // Étape 3 : pricehistory — volume 7j, dernier prix de vente (auth requise)
-        const recentSale = await getRecentSale(marketHashName, 7);
         if (recentSale) {
             sales7d = recentSale.totalVolume || 0;
             // Dernier prix de vente si vente < 7j
-            priceEur = recentSale.price;
-            lastSalePriceEur = recentSale.price;
+            if (recentSale.price != null) {
+                priceEur = recentSale.price;
+                lastSalePriceEur = recentSale.price;
+            }
         }
 
-        // Si pas de vente récente, le prix résolu est le buy order
+        // Si pas de vente récente exploitable, le prix résolu est le buy order
         if (priceEur === null) {
             priceEur = buyOrderEur;
         }
 
-        ES_log(`[processCard] ${marketHashName} → sell:${sellPriceEur !== null ? sellPriceEur + '€' : 'N/A'} x${sellQty || 0} | buy:${buyOrderEur !== null ? buyOrderEur + '€' : 'N/A'} x${buyOrderQty != null ? buyOrderQty : '?'} | 7j:${sales7d} ventes | resolved:${priceEur !== null ? priceEur + '€' : 'N/A'}`);
+        // Fallbacks endpoints — uniquement pour les données que la page
+        // listing n'a pas fournies (cache SSR absent = page coquille)
+
+        // Prix de vente manquant → priceoverview (pas d'auth)
+        if (sellPriceEur === null) {
+            const pov = await getPriceOverview(marketHashName);
+            if (pov) {
+                sellPriceEur = pov.sellPriceEur;
+            }
+        }
+
+        // Buy order manquant → orderbook (pas d'auth, USD).
+        // Sauté si le cache SSR orderbook était présent en EUR (autoritaire,
+        // même sans buy order) ou si le texte l'a déjà fourni.
+        if (buyOrderEur === null && !(ssrOrderbook && ssrOrderbook.pricesEur)) {
+            const orderbook = await getOrderbook(marketHashName);
+            if (orderbook) {
+                if (sellQty === null) sellQty = orderbook.sellQtyAtLowest || 0;
+
+                if (orderbook.highestBuyOrder) {
+                    // Convertir le buy order USD → EUR en utilisant le ratio du prix de vente
+                    if (sellPriceEur && orderbook.lowestSellOrder) {
+                        // Ratio : sellPriceEur / sellPriceUsd = taux de change effectif
+                        const exchangeRate = sellPriceEur / orderbook.lowestSellOrder;
+                        buyOrderEur = Math.round(orderbook.highestBuyOrder * exchangeRate * 100) / 100;
+                    } else {
+                        // Fallback : taux fixe
+                        const USD_TO_EUR = 0.92;
+                        buyOrderEur = Math.round(orderbook.highestBuyOrder * USD_TO_EUR * 100) / 100;
+                    }
+                    if (priceEur === null) priceEur = buyOrderEur;
+                    // Nombre total de demandes d'achat si ni le texte ni le SSR ne l'ont fourni
+                    if (buyOrderQty === null && orderbook.totalBuyOrders != null) {
+                        buyOrderQty = orderbook.totalBuyOrders;
+                    }
+                }
+            }
+        }
+
+        ES_log(`[processCard] ${marketHashName}${listingData?.ssrAvailable ? ' [SSR]' : ''} → sell:${sellPriceEur !== null ? sellPriceEur + '€' : 'N/A'} x${sellQty || 0} | buy:${buyOrderEur !== null ? buyOrderEur + '€' : 'N/A'} x${buyOrderQty != null ? buyOrderQty : '?'} | 7j:${sales7d} ventes | resolved:${priceEur !== null ? priceEur + '€' : 'N/A'}`);
 
         // Mettre à jour la DB
         db.prepare(`

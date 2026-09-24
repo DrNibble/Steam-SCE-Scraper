@@ -14,7 +14,8 @@ steam-sce/
 │       ├── utils.js       # Utilitaires (HTTP, clean, isSteamEvent, etc.)
 │       ├── steam.js       # Scraping Steam (badges, inventaire, historique trades)
 │       ├── sce.js         # Scraping Steam Card Exchange (prix, stock, credits, refresh periodique)
-│       ├── market.js       # Prix marché Steam (orderbook, pricehistory, listing page, buy orders)
+│       ├── market.js       # Prix marché Steam (page listing + cache SSR, orderbook, pricehistory, buy orders)
+│       ├── ssrCache.js     # Parsing du cache SSR React Query de la page listing (helpers purs)
 │       ├── marketQueue.js # Worker temps réel (token bucket, file prioritaire, stale-while-revalidate)
 │       ├── analyze.js     # Analyse des badges (completion, couts, cartes cheres)
 │       ├── api.js        # Serveur API REST (lecture seule de la DB)
@@ -331,29 +332,40 @@ Les prix marché (`priceEur` et `lastSalePriceEur`) sont arrondis à 2 décimale
 
 ### Logique de prix marché
 
-Pour chaque carte, le worker récupère 4 sources et stocke :
+Pour chaque carte, la source primaire est la **page listing Steam** (1 requête), puis les endpoints en fallback selon les données manquantes. Le worker stocke :
 
 | Champ | Source | Description |
 |-------|--------|-------------|
-| `steam_market_sell_price_eur` | listing page / priceoverview | Prix de vente le plus bas (EUR). Priorité à la listing page (EUR direct), fallback priceoverview |
-| `steam_market_sell_qty` | listing page / orderbook | Volume de vente total (listing page) ou quantité au prix le plus bas (orderbook) |
-| `steam_market_buy_order_eur` | listing page / orderbook | Demande d'achat la plus haute (EUR). Priorité à la listing page (EUR direct), fallback orderbook (USD converti) |
-| `steam_market_buy_order_qty` | listing page | Nombre de demandes d'achat (volume total) |
-| `steam_market_sales_7d` | pricehistory | Volume de vente cumulé sur 7 jours |
-| `steam_market_last_sale_price_eur` | pricehistory | Prix de la dernière vente dans les 7 jours (NULL si pas de vente). Arrondi à 2 décimales |
+| `steam_market_sell_price_eur` | listing page (texte / cache SSR) / priceoverview | Prix de vente le plus bas (EUR). Priorité à la listing page (EUR direct), fallback priceoverview |
+| `steam_market_sell_qty` | listing page / cache SSR orderbook / orderbook | Volume de vente total (listing page) ou quantité au prix le plus bas (orderbook) |
+| `steam_market_buy_order_eur` | listing page (texte / cache SSR) / orderbook | Demande d'achat la plus haute (EUR). Priorité à la listing page (EUR direct), fallback orderbook (USD converti) |
+| `steam_market_buy_order_qty` | listing page / cache SSR orderbook | Nombre de demandes d'achat (volume total) |
+| `steam_market_sales_7d` | cache SSR pricehistory / pricehistory | Volume de vente cumulé sur 7 jours |
+| `steam_market_last_sale_price_eur` | cache SSR pricehistory / pricehistory | Prix de la dernière vente dans les 7 jours (NULL si pas de vente). Arrondi à 2 décimales |
 | `steam_market_price_eur` | résolu | Dernier prix de vente si < 7j, sinon buy order. Arrondi à 2 décimales. Peuple initialement par la conversion EUR du prix gamepage SCE (phase 1), puis affine par le marché |
 | `sce_market_price_usd` | gamepage SCE | Prix USD de la carte sur la gamepage SCE (section "Trading Cards") |
 
 Conversions EUR : le buy order de l'orderbook est en USD - le taux effectif est calculé à partir du ratio `prix_vente_EUR / prix_vente_USD` (priceoverview / orderbook), fallback à 0.92. Les prix de la listing page sont en EUR directement (pas de conversion nécessaire). Les prix de la gamepage SCE sont convertis avec le taux BCE (frankfurter.app, cache 24h, surcharge `SCE_USD_TO_EUR`, fallback 0.92).
 
-#### Page listing Steam (`getListingPageInfo`)
+#### Page listing Steam (`getListingPageData`, module `ssrCache.js`)
 
-La page listing (`https://steamcommunity.com/market/listings/753/<hash>`) est parsée pour extraire les volumes et prix en EUR directement, sans conversion USD → EUR :
+La page listing (`https://steamcommunity.com/market/listings/753/<hash>`) est la source primaire du worker : **1 requête remplace jusqu'à 3 appels endpoints**. Elle fournit deux choses :
+
+**1. Cache SSR (primaire)** : quand le rendu côté serveur réussit, la page embarque un cache React Query déshydraté (`window.SSR.renderContext`) contenant les réponses des endpoints `/market/orderbook` (buy/sell orders + profondeur) et `/market/pricehistory` (historique complet des ventes) — voir `ssrCache.js`.
+
+**2. Texte visible (complément/fallback)** : volumes et prix en EUR directement, sans conversion USD → EUR :
 
 - **Ventes** : volume total (ex: "10 à vendre à partir de €0,97") → `steam_market_sell_qty` = 10, `steam_market_sell_price_eur` = 0.97
 - **Achats** : volume total (ex: "7 demandes d'achat à €0,09 ou moins") → `steam_market_buy_order_qty` = 7, `steam_market_buy_order_eur` = 0.09
 
-Les valeurs de la listing page remplacent celles de l'orderbook (USD → EUR) quand elles sont disponibles, car plus précises (prix EUR natifs). Le parsing utilise regex sur le texte débarrassé des tags HTML (les classes CSS Steam sont dynamiques). Gère le français et l'anglais.
+**Règles de fallback** :
+
+- Les prix du cache SSR ne sont utilisés en EUR que si la devise est l'EUR (`eCurrency`/`ecurrency` === 3) ; sinon les endpoints prennent le relais (les quantités restent exploitées, elles sont indépendantes de la devise)
+- Cache SSR `pricehistory` présent sans vente dans les 7 jours = donnée autoritaire → aucun appel endpoint
+- ⚠ **Le cache SSR est absent pour les items à fort volume de ventes** (Steam sert une page coquille "Failed to load item description") : les endpoints restent alors indispensables en fallback
+- Le parsing du texte utilise regex sur le texte débarrassé des tags HTML (les classes CSS Steam sont dynamiques). Gère le français et l'anglais, le symbole € avant ou après le montant
+
+Les helpers de parsing du cache SSR sont regroupés dans `node/src/ssrCache.js` (module 100% pur, sans dépendance) et testables isolément avec `node test-ssrCache.mjs`.
 
 ## Script Tampermonkey
 
