@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam-Gamecards-SCE based on API
 // @namespace    http://tampermonkey.net/
-// @version      0.4
+// @version      0.5
 // @description  Scrap complet Steam & SCE avec cache persistant, workers et API REST
 // @author       DrNibble
 // @match        https://steamcommunity.com/profiles/*/badges*
@@ -11,6 +11,7 @@
 // @match        https://steamcommunity.com/profiles/*/inventory*
 // @match        https://steamcommunity.com/my/inventory*
 // @match        https://steamcommunity.com/market/search*
+// @match        https://steamcommunity.com/market/listings/753/*
 
 // @grant        GM.xmlHttpRequest
 // @grant        GM.setValue
@@ -1080,10 +1081,19 @@ ES_log("[getPageAppids] Entrée fonction");
                             if (data.success) {
                                 const parsePrice = (str) => {
                                     if (!str) return null;
-                                    // "1,98€" ou "€1.98" → 1.98
+                                    // Steam retourne les prix au format FR: "1,98€" ou EN: "€1.98"
+                                    // On extrait le nombre et on gère les deux formats
                                     const m = str.match(/[\d.,]+/);
                                     if (!m) return null;
-                                    return parseFloat(m[0].replace(/\./g, '').replace(',', '.'));
+                                    let numStr = m[0];
+                                    if (numStr.includes(',') && numStr.includes('.')) {
+                                        // Format mixte: "1,234.56" → on garde le point comme séparateur décimal
+                                        numStr = numStr.replace(/,/g, '');
+                                    } else if (numStr.includes(',')) {
+                                    // Format FR: "1,98" → virgule = séparateur décimal
+                                        numStr = numStr.replace(',', '.');
+                                    }
+                                    return parseFloat(numStr);
                                 };
                                 resolve({
                                     sellPriceEur: parsePrice(data.lowest_price),
@@ -1252,6 +1262,149 @@ ES_log("[getPageAppids] Entrée fonction");
         });
     };
 
+    /**
+     * PAGE LISTING INDIVIDUEL (/market/listings/753/<appid>-<name>)
+     * Modifie le prix Steam "starting at" par le dernier prix vendu 7j.
+     * Ajoute les infos SCE (worth, stock, quick-trade) à côté du prix.
+     */
+    win.ES.renderMarketListingSCE = function() {
+        // Extraire appid et nom depuis l'URL
+        const m = window.location.pathname.match(/\/market\/listings\/753\/([^?#]+)/);
+        if (!m) return;
+        let hash;
+        try { hash = decodeURIComponent(m[1]); } catch { hash = m[1]; }
+        const dash = hash.indexOf('-');
+        if (dash <= 0) return;
+        const appid = hash.slice(0, dash);
+        const name = hash.slice(dash + 1).replace(/\s*\(trading card\)\s*$/i, '');
+
+        // Index pour retrouver la carte
+        const normName = win.ES.clean(name, true);
+        const game = win.ES.DATA[appid];
+        const card = game && game.cards
+            ? game.cards.find(c => win.ES.clean(c.name, true) === normName)
+            : null;
+
+        const stock = card ? (parseInt(card["sce stock"], 10) || 0) : 0;
+        if (!card || stock <= 1) return;
+
+        // --- Trouver le span de prix "starting at" sur la page listing ---
+        // Structure: <span class="E-F5JVsCXEo- IokSIloSPlA-"><span>9</span> for sale starting at <span class="IokSIloSPlA-" style="--text-color:var(--color-text-body-title)">R$ 11,12</span></span>
+        // En FR: "À partir de 1,98 €" peut être dans un span séparé ou inline
+        const allSpans = document.querySelectorAll('span');
+        let priceContainer = null; // span parent contenant "starting at" / "À partir de"
+        let priceValueSpan = null;  // span contenant la valeur du prix
+
+        for (const sp of allSpans) {
+            const text = sp.textContent.trim();
+            // Page listing: "X for sale starting at PRICE"
+            // Page search: "À partir de X,XX €" ou "Starting at: $X.XX"
+            if (/starting at/i.test(text) || /^À partir de/i.test(text) || /^Starting at/i.test(text)) {
+                priceContainer = sp;
+                // Chercher le span enfant contenant le prix (devise ou nombre)
+                for (const child of sp.querySelectorAll('span')) {
+                    if (/[€$£]|\d[,.]\d{2}/.test(child.textContent)) {
+                        priceValueSpan = child;
+                        break;
+                    }
+                }
+                // Si pas de span enfant, le texte entier est le prix
+                if (!priceValueSpan && /\d[,.]\d{2}/.test(text)) {
+                    priceValueSpan = sp;
+                }
+                break;
+            }
+        }
+
+        if (!priceValueSpan) return;
+
+        // --- Modification du prix : dernier prix vendu dans les 7 jours ---
+        const existingPrice = priceValueSpan.querySelector('.es-sce-price');
+        if (existingPrice && existingPrice.dataset.hash === hash) {
+            // Déjà traité
+        } else {
+            if (existingPrice) existingPrice.remove();
+
+            const sales7d = parseInt(card.steamMarketSales7d) || 0;
+            const lastSalePriceEur = card.steamMarketLastSalePriceEur != null
+                ? parseFloat(card.steamMarketLastSalePriceEur)
+                : null;
+            const marketPriceEur = card.steamMarketPriceEur != null
+                ? parseFloat(card.steamMarketPriceEur)
+                : null;
+
+            let displayPrice = null;
+            let priceSource = '';
+            if (lastSalePriceEur != null && lastSalePriceEur > 0) {
+                displayPrice = lastSalePriceEur;
+                priceSource = sales7d > 0 ? `${sales7d} ventes 7j` : 'dernière vente';
+            } else if (sales7d > 0 && marketPriceEur != null && marketPriceEur > 0) {
+                displayPrice = marketPriceEur;
+                priceSource = `${sales7d} ventes 7j`;
+            }
+
+            // FALLBACK : si aucune donnée de prix dans l'API, fetch via Steam priceoverview
+            if (displayPrice == null) {
+                const fallback = win.ES.getPriceFallback(hash, () => {
+                    win.ES.renderMarketListingSCE();
+                });
+                if (fallback && fallback.medianPriceEur != null && fallback.medianPriceEur > 0) {
+                    displayPrice = fallback.medianPriceEur;
+                    priceSource = fallback.volume > 0 ? `prix médian (${fallback.volume} ventes)` : 'prix médian';
+                }
+            }
+
+            if (displayPrice != null) {
+                const priceText = displayPrice.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                const priceEl = document.createElement('span');
+                priceEl.className = 'es-sce-price';
+                priceEl.dataset.hash = hash;
+                priceEl.style.cssText = 'color:#8ed6fb;font-weight:bold;';
+                priceEl.textContent = `${priceText} €`;
+                priceEl.title = `Dernier prix vendu (${priceSource})`;
+                priceValueSpan.textContent = '';
+                priceValueSpan.appendChild(priceEl);
+            }
+        }
+
+        // --- Ajout info SCE (worth + stock) à côté du prix ---
+        if (priceContainer) {
+            const existingSCE = priceContainer.querySelector('.es-sce-worth');
+            if (!existingSCE || existingSCE.dataset.hash !== hash) {
+                if (existingSCE) existingSCE.remove();
+                const worth = card["sce worth"] ?? 0;
+                const el = document.createElement('span');
+                el.className = 'es-sce-worth';
+                el.dataset.hash = hash;
+                el.style.cssText = 'color:#57cbde;font-weight:bold;margin-left:8px;white-space:nowrap;';
+                el.textContent = `· SCE ${worth}c (${stock})`;
+                el.title = `SCE : ${stock} en stock, valeur ${worth} crédits`;
+                const quickTradeUrl = card["sce quick-trade"];
+                if (quickTradeUrl) {
+                    el.style.cursor = 'pointer';
+                    el.style.textDecoration = 'underline';
+                    el.title += ' — clic : Quick-Trade SCE';
+                    el.onclick = (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        window.open(quickTradeUrl, '_blank');
+                    };
+                }
+                priceContainer.appendChild(el);
+            }
+        }
+    };
+
+    // Observer pour la page listing (React re-render le prix)
+    win.ES.watchMarketListing = function() {
+        let timer = null;
+        const run = () => { timer = null; win.ES.renderMarketListingSCE(); };
+        run();
+        new MutationObserver(() => {
+            if (!timer) timer = setTimeout(run, 500);
+        }).observe(document.body, { childList: true, subtree: true });
+    };
+
     // Les résultats sont rendus par React (pagination/filtres sans rechargement) :
     // on ré-applique le rendu à chaque mutation du DOM (debounce).
     // FALLBACK: détecte les appids manquants de l'API et fetch SCE en arrière-plan.
@@ -1324,6 +1477,28 @@ ES_log("[getPageAppids] Entrée fonction");
         if (currentUrl.includes('/market/search')) {
             ES_log(`[Workflow] Page recherche marché (${apiAvailable ? 'API' : 'cache local'}).`);
             win.ES.watchMarketSearch();
+            return;
+        }
+
+        // --- CAS 0b: PAGE LISTING INDIVIDUEL MARCHÉ ---
+        if (currentUrl.includes('/market/listings/753/')) {
+            ES_log(`[Workflow] Page listing marché (${apiAvailable ? 'API' : 'cache local'}).`);
+            // Fallback: si l'appid n'est pas dans l'API, fetch SCE
+            const listingMatch = currentUrl.match(/\/market\/listings\/753\/(\d+)-/);
+            if (listingMatch) {
+                const listingAppid = listingMatch[1];
+                const game = win.ES.DATA[listingAppid];
+                if (!game || !game.cards || game.cards.length === 0) {
+                    ES_log(`[Workflow] Appid ${listingAppid} absent de l'API — fallback SCE.`);
+                    try {
+                        await win.ES.fetchSCEFresh(listingAppid);
+                        await win.ES.saveToCache(listingAppid);
+                    } catch (e) {
+                        console.warn(`[Workflow] Erreur fallback SCE pour ${listingAppid}:`, e);
+                    }
+                }
+            }
+            win.ES.watchMarketListing();
             return;
         }
 
