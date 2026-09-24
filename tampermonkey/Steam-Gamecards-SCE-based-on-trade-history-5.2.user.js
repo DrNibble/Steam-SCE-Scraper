@@ -16,6 +16,7 @@
 // @grant        GM.getValue
 // @grant        unsafeWindow
 // @connect      www.steamcardexchange.net
+// @connect      steamcardexchange.net
 // @connect      localhost
 // @connect      127.0.0.1
 // ==/UserScript==
@@ -135,6 +136,367 @@
             win.ES.DATA = Object.assign(win.ES.DATA, parsed);
         }
         return win.ES.DATA;
+    };
+
+    // --- NETTOYAGE NOMS ---
+    win.ES.clean = function(str, fullNormalize = false) {
+        if (!str) return "";
+        let cleaned = str.toLowerCase().replace(/[\n\t\r]/g, "").replace(/\s{2,}/g, " ").trim();
+        if (fullNormalize) {
+            return cleaned
+                .replace(/^badge\s+/i, "")
+                .replace(/\(trading card\)$/i, "")
+                .replace(/['":!?,.()]/g, "")
+                .replace(/\s+/g, ' ')
+                .trim();
+        }
+        return cleaned;
+    };
+
+    /////////////////////////////////////////////////////////////////////////////////////////////
+    ///////////////////////////////// SCE FETCH //////////////////////////////////////////////////
+    /////////////////////////////////////////////////////////////////////////////////////////////
+
+    // --- HTTP WRAPPER pour SCE (GM.xmlHttpRequest avec cookies navigateur) ---
+    win.ES.sceHttpGet = async function(url) {
+        return new Promise((resolve, reject) => {
+            GM.xmlHttpRequest({
+                method: "GET",
+                url: url,
+                timeout: 15000,
+                onload: (res) => {
+                    if (res.status >= 200 && res.status < 300) {
+                        resolve(res.responseText);
+                    } else {
+                        reject(new Error(`SCE HTTP ${res.status} pour ${url}`));
+                    }
+                },
+                onerror: (err) => reject(err),
+                ontimeout: () => reject(new Error('SCE timeout'))
+            });
+        });
+    };
+
+    // --- FETCH SCE GLOBAL INFO (credit, pending offers, wait time) ---
+    win.ES._creditFetched = false;
+    win.ES.fetchSCEGlobalInfo = async function() {
+        if (win.ES._creditFetched) return;
+
+        try {
+            ES_log("[fetchSCEGlobalInfo] Récupération profil SCE...");
+            const profileHtml = await win.ES.sceHttpGet("https://www.steamcardexchange.net/index.php?profile");
+
+            // Detection du mur de connexion
+            if (profileHtml.includes('Please login to see your profile')) {
+                console.warn("[SCE] Session SCE expirée ou non connecté. Connectez-vous sur steamcardexchange.net dans ce navigateur.");
+                win.ES.DATA.scecredit = 0;
+                win.ES.DATA.scePendingOffers = 0;
+                win.ES.DATA.sceWaitTime = 0;
+                win.ES._creditFetched = true;
+                return;
+            }
+
+            const doc = new DOMParser().parseFromString(profileHtml, "text/html");
+
+            // --- Credit ---
+            let rawCreditText = "";
+            const creditEl = doc.querySelector('.inventory-user-credits .number');
+            if (creditEl) {
+                rawCreditText = creditEl.textContent;
+            } else {
+                const desktopCreditEl = doc.querySelector('nav .hidden.lg\\:block button div.ml-auto');
+                if (desktopCreditEl) rawCreditText = desktopCreditEl.textContent;
+            }
+            // Fallback: chercher un element contenant un nombre + "credit"
+            if (!rawCreditText) {
+                doc.querySelectorAll('nav span, nav button, nav div').forEach(el => {
+                    const text = el.textContent.trim();
+                    if (/^\d+\s*c$/i.test(text) || /^\d+\s*credits?$/i.test(text) || /^credits?:\s*\d+$/i.test(text)) {
+                        rawCreditText = text;
+                    }
+                });
+            }
+            win.ES.DATA.scecredit = parseInt(rawCreditText.replace(/\D/g, ""), 10) || 0;
+
+            // --- Pending offers + wait time ---
+            let pendingOffers = 0;
+            let waitTime = 0;
+            let foundStatus = false;
+
+            const infoSpans = doc.querySelectorAll('div.bg-gray-light span, div.bg-gray-lighter span');
+            for (const span of infoSpans) {
+                const text = span.textContent;
+                if (text.includes('offers pending')) {
+                    const pendingMatch = text.match(/(\d+)\s+offers\s+pending/i);
+                    pendingOffers = pendingMatch ? parseInt(pendingMatch[1], 10) : 0;
+                    const waitMatch = text.match(/wait\s+time\s+is\s+([\d.]+)\s+minutes/i);
+                    waitTime = waitMatch ? parseFloat(waitMatch[1]) : 0;
+                    foundStatus = true;
+                    break;
+                }
+            }
+
+            // Fallback: page inventory
+            if (!foundStatus) {
+                try {
+                    const invHtml = await win.ES.sceHttpGet("https://www.steamcardexchange.net/index.php?inventory");
+                    const invDoc = new DOMParser().parseFromString(invHtml, "text/html");
+                    invDoc.querySelectorAll('span').forEach(span => {
+                        const text = span.textContent;
+                        if (text.includes('offers pending')) {
+                            const pendingMatch = text.match(/(\d+)\s+offers\s+pending/i);
+                            pendingOffers = pendingMatch ? parseInt(pendingMatch[1], 10) : 0;
+                            const waitMatch = text.match(/wait\s+time\s+is\s+([\d.]+)\s+minutes/i);
+                            waitTime = waitMatch ? parseFloat(waitMatch[1]) : 0;
+                            foundStatus = true;
+                        }
+                    });
+                } catch (e) {
+                    ES_log(`[fetchSCEGlobalInfo] Erreur page inventory: ${e.message}`);
+                }
+            }
+
+            win.ES.DATA.scePendingOffers = pendingOffers;
+            win.ES.DATA.sceWaitTime = waitTime;
+            win.ES._creditFetched = true;
+            ES_log(`[fetchSCEGlobalInfo] Crédit: ${win.ES.DATA.scecredit} | File: ${pendingOffers} offres | WaitTime: ${waitTime} min.`);
+        } catch (e) {
+            console.warn("[fetchSCEGlobalInfo] Erreur:", e);
+            win.ES._creditFetched = true; // Evite les retries en boucle
+        }
+    };
+
+    // --- FETCH SCE GAME PAGE (prix USD + check trade-in disabled) ---
+    // Retourne { html, tradeInDisabled } ou null si page login/erreur
+    win.ES.fetchSCEGamePage = async function(appid) {
+        const html = await win.ES.sceHttpGet(`https://www.steamcardexchange.net/index.php?gamepage-appid-${appid}/`);
+        if (!html) return null;
+        // Detection page login
+        if (html.includes('Please login')) return null;
+        // Detection trade-in disabled
+        if (html.includes('Trade-in disabled')) return { html: null, tradeInDisabled: true };
+        // Verification: la section Trading Cards doit exister
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const sectionHeader = doc.querySelector('#series-1-cards')?.closest('div.bg-gray-dark');
+        if (!sectionHeader) return null; // Page invalide ou structure inattendue
+        return { html, tradeInDisabled: false };
+    };
+
+    // --- PARSE SCE GAME PRICES (USD) depuis le HTML de la gamepage ---
+    win.ES.parseSCEGamePrices = function(html) {
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const priceMap = {};
+        const sectionHeader = doc.querySelector('#series-1-cards')?.closest('div.bg-gray-dark');
+        if (!sectionHeader) return priceMap;
+        const grid = sectionHeader.nextElementSibling;
+        if (!grid || !grid.classList.contains('grid')) return priceMap;
+
+        grid.querySelectorAll('div.flex.flex-col').forEach(block => {
+            const nameEl = block.querySelector('div.text-sm.text-center.break-words');
+            const priceLink = block.querySelector('a.btn-primary');
+            if (!nameEl || !priceLink) return;
+            const match = priceLink.textContent.match(/Price:\s*\$([\d.,]+)/i);
+            if (!match) return;
+            const price = parseFloat(match[1].replace(/,/g, ''));
+            if (!isNaN(price)) {
+                priceMap[win.ES.clean(nameEl.textContent.trim(), true)] = price;
+            }
+        });
+        return priceMap;
+    };
+
+    // --- FETCH SCE INVENTORY (stock, worth, price, quick-trade) ---
+    // Retourne null si page login/erreur, sinon un Map des cartes
+    win.ES.fetchSCEInventory = async function(appid) {
+        const html = await win.ES.sceHttpGet(`https://www.steamcardexchange.net/index.php?inventorygame-appid-${appid}`);
+        if (!html || html.includes('Please login')) return null;
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const inventoryMap = {};
+
+        doc.querySelectorAll('div.flex.flex-col.items-center.p-5').forEach(block => {
+            const nameEl = block.querySelector('div.text-sm.break-words');
+            if (!nameEl) return;
+            const name = nameEl.textContent.trim();
+
+            // Stock
+            let stock = 0;
+            block.querySelectorAll('div').forEach(div => {
+                if (div.textContent.includes('Stock:')) {
+                    const match = div.textContent.match(/Stock:\s*(\d+)/i);
+                    if (match) stock = parseInt(match[1], 10);
+                }
+            });
+
+            // Worth & Price
+            let worth = 0;
+            let price = 0;
+            block.querySelectorAll('div.mt-auto.text-sm > div').forEach(line => {
+                const text = line.textContent.toLowerCase();
+                const valueSpan = line.querySelector('span.font-open-sans');
+                if (!valueSpan) return;
+                const val = parseInt(valueSpan.textContent, 10) || 0;
+                if (text.includes('worth')) worth = val;
+                if (text.includes('price')) price = val;
+            });
+
+            let tradeLink = block.querySelector('a.btn-primary')?.href || '';
+            if (tradeLink && !tradeLink.startsWith('http')) {
+                tradeLink = 'https://www.steamcardexchange.net' + (tradeLink.startsWith('/') ? '' : '/') + tradeLink;
+            }
+
+            inventoryMap[win.ES.clean(name, true)] = { stock, worth, price, quickTrade: tradeLink };
+        });
+
+        ES_log(`[fetchSCEInventory] ${Object.keys(inventoryMap).length} cartes trouvées pour appid ${appid}.`);
+        return inventoryMap; // Peut être vide si la page n'a pas de cartes, mais c'est valide
+    };
+
+    // --- FETCH SCE FRESH (combine tout: global info + game page + inventory) ---
+    win.ES.fetchSCEFresh = async function(appid) {
+        if (win.ES.isSteamEvent(appid)) return null;
+
+        ES_log(`[fetchSCEFresh] START ${appid}`);
+
+        // Init structure si inexistante
+        if (!win.ES.DATA[appid]) {
+            win.ES.DATA[appid] = { appid: appid, cards: [] };
+        }
+
+        if (win.ES.DATA[appid].disabled) return null;
+
+        // 1. Infos globales (credit, pending offers)
+        await win.ES.fetchSCEGlobalInfo();
+
+        // 2. Game page (prix USD + check trade-in disabled)
+        const gamePageResult = await win.ES.fetchSCEGamePage(appid);
+        if (!gamePageResult) {
+            ES_log(`[fetchSCEFresh] Page SCE invalide ou login requis pour ${appid}. Conservation du cache.`);
+            return null; // Ne modifie pas disabled, ne merge pas
+        }
+        if (gamePageResult.tradeInDisabled) {
+            ES_log(`[fetchSCEFresh] Trade-in désactivé pour ${appid}.`);
+            win.ES.DATA[appid].disabled = true;
+            return null;
+        }
+        const marketPrices = win.ES.parseSCEGamePrices(gamePageResult.html);
+        ES_log(`[fetchSCEFresh] ${Object.keys(marketPrices).length} prix USD extraits de la gamepage.`);
+
+        // 3. Inventaire SCE (stock, worth, price, quick-trade)
+        const inventoryMap = await win.ES.fetchSCEInventory(appid);
+        if (inventoryMap === null) {
+            ES_log(`[fetchSCEFresh] Page inventory SCE invalide ou login requis pour ${appid}. Fusion des prix uniquement.`);
+        }
+
+        // 4. Fusion dans les cartes existantes (non-destructif: préserve les valeurs si SCE ne retourne pas une carte)
+        const data = win.ES.DATA[appid];
+        if (data && data.cards) {
+            data.cards = data.cards.map(card => {
+                const normName = win.ES.clean(card.name, true);
+                const hasInv = inventoryMap && Object.prototype.hasOwnProperty.call(inventoryMap, normName);
+                const hasMarket = Object.prototype.hasOwnProperty.call(marketPrices, normName);
+                const inv = hasInv ? inventoryMap[normName] : null;
+
+                return {
+                    ...card,
+                    "sce stock": hasInv ? inv.stock : (card["sce stock"] ?? 0),
+                    "sce worth": hasInv ? inv.worth : (card["sce worth"] ?? 0),
+                    "sce price": hasInv ? inv.price : (card["sce price"] ?? 0),
+                    "sce marketPriceUSD": hasMarket ? marketPrices[normName] : (card["sce marketPriceUSD"] ?? 0),
+                    "sce quick-trade": hasInv ? (inv.quickTrade || "") : (card["sce quick-trade"] ?? "")
+                };
+            });
+        }
+
+        data.disabled = false;
+        data.fetchedAt = Date.now();
+
+        ES_log(`[fetchSCEFresh] Appid ${appid} enrichi et fusionné avec succès.`);
+        return data;
+    };
+
+    // --- ANALYZE BADGE STATUS (non-destructif: préserve les champs existants) ---
+    win.ES.analyzeBadgeStatus = function(appid) {
+        const data = win.ES.DATA[appid];
+        if (!data || data.disabled || !data.cards || data.cards.length === 0) return null;
+
+        const setCardsTotal = parseInt(data.setCards, 10) || 0;
+        if (setCardsTotal <= 0) return data; // Garde-fou: ne pas calculer sans setCards
+
+        let maxPrice = 0;
+        let expensiveCardName = "";
+        let expensiveIsOwned = false;
+        let totalAvailableFromBot = 0;
+        let missingCount = 0;
+        let totalCostSCE = 0;
+        let allMissingAreAvailable = true;
+        let totalOwnedQty = 0;
+
+        data.cards.forEach(card => {
+            let myQty = (card.inv ? card.inv.length : 0);
+            card.qty = myQty;
+            totalOwnedQty += myQty;
+
+            // Prix: prioriser steamMarketPriceEur (si ventes 7j), sinon fallback SCE USD * 0.92
+            const sales7d = parseInt(card.steamMarketSales7d) || 0;
+            const steamPriceEur = (sales7d > 0 && card.steamMarketPriceEur != null)
+                ? parseFloat(card.steamMarketPriceEur) || 0
+                : 0;
+            const priceUSD = parseFloat(card["sce marketPriceUSD"]) || 0;
+            const priceEUR = steamPriceEur > 0
+                ? steamPriceEur
+                : (priceUSD > 0 ? Math.round(priceUSD * 0.92 * 100) / 100 : 0);
+            if (priceEUR > maxPrice) {
+                maxPrice = priceEUR;
+                expensiveCardName = card.name;
+                expensiveIsOwned = (myQty > 0);
+            }
+
+            const stock = parseInt(card["sce stock"]) || 0;
+            if (stock > 1) totalAvailableFromBot += (stock - 1);
+
+            if (myQty === 0) {
+                missingCount++;
+                if (stock > 1) {
+                    totalCostSCE += (parseInt(card["sce price"]) || 0);
+                } else {
+                    allMissingAreAvailable = false;
+                }
+            }
+        });
+
+        const currentCredit = win.ES.DATA.scecredit || 0;
+        const expensiveThreshold = 0.14;
+        const isTooExpensive = (maxPrice > expensiveThreshold && !expensiveIsOwned);
+        const expensiveInfo = maxPrice > expensiveThreshold
+            ? { cardname: expensiveCardName, marketeurprice: maxPrice, isOwned: expensiveIsOwned }
+            : null;
+
+        const isCompletableViaTrade = (totalOwnedQty >= setCardsTotal);
+        let isCompletableViaSCE = (missingCount > 0) && allMissingAreAvailable && (totalCostSCE <= currentCredit);
+        let isCompletableviaSCEdoublon = (missingCount > 0) && (totalAvailableFromBot >= missingCount) && (totalCostSCE <= currentCredit);
+        let isCompletableviaSCEwobudget = (missingCount > 0) && allMissingAreAvailable;
+
+        if (isTooExpensive) {
+            isCompletableViaSCE = false;
+            isCompletableviaSCEwobudget = false;
+            isCompletableviaSCEdoublon = false;
+        }
+
+        // Mise à jour non-destructive: on ne touche qu'aux champs calculés
+        data.totalOwnedQty = totalOwnedQty;
+        data.isCompletableViaTrade = isCompletableViaTrade;
+        data.isCompletableViaSCE = isCompletableViaSCE;
+        data.isCompletableviaSCEwobudget = isCompletableviaSCEwobudget;
+        data.isCompletableviaSCEdoublon = isCompletableviaSCEdoublon;
+        // hasExpensiveCard: seulement si on a un prix, sinon on conserve la valeur existante
+        if (maxPrice > 0) {
+            data.hasExpensiveCard = expensiveInfo;
+        }
+        data.totalCostSCE = totalCostSCE;
+        data.missingCount = missingCount;
+
+        ES_log(`[analyzeBadgeStatus] ${appid}: owned=${totalOwnedQty}/${setCardsTotal}, missing=${missingCount}, cost=${totalCostSCE}c`);
+        return data;
     };
 
     /**
@@ -518,6 +880,48 @@ ES_log("[getPageAppids] Entrée fonction");
         // Ajout des deux boutons à la zone cible
         target.prepend(reportBtn);
         target.prepend(purgeBtn);
+
+        // --- 3. BOUTON RAFRAÎCHIR SCE (sur page gamecards) ---
+        if (window.location.href.includes('/gamecards/')) {
+            const appIdMatch = window.location.href.match(/gamecards\/(\d+)/);
+            if (appIdMatch) {
+                const refreshBtn = document.createElement("a");
+                refreshBtn.id = "es-refresh-sce-btn";
+                refreshBtn.href = "javascript:void(0);";
+                refreshBtn.className = "btn_grey_black btn_small_thin";
+                refreshBtn.style.margin = "5px";
+                refreshBtn.style.display = "inline-block";
+                refreshBtn.innerHTML = "<span style='color: #57cbde;'>🔄 Rafraîchir SCE</span>";
+
+                refreshBtn.onclick = async () => {
+                    refreshBtn.innerHTML = "<span style='color: #57cbde;'>⏳ SCE...</span>";
+                    const appId = appIdMatch[1];
+                    try {
+                        win.ES._creditFetched = false; // Force refresh global info
+                        await win.ES.fetchSCEFresh(appId);
+                        if (win.ES.analyzeBadgeStatus) {
+                            win.ES.analyzeBadgeStatus(appId);
+                        }
+                        await win.ES.saveToCache(appId);
+                        if (win.ES.injectQuickTradeButtons) {
+                            win.ES.injectQuickTradeButtons(appId);
+                            win.ES.renderGamecardStatus(appId);
+                        }
+                        refreshBtn.innerHTML = "<span style='color: #a3d200;'>✅ SCE mis à jour</span>";
+                        setTimeout(() => {
+                            refreshBtn.innerHTML = "<span style='color: #57cbde;'>🔄 Rafraîchir SCE</span>";
+                        }, 3000);
+                    } catch (e) {
+                        console.warn('[Refresh SCE] Erreur:', e);
+                        refreshBtn.innerHTML = "<span style='color: #ff9d00;'>❌ Erreur SCE</span>";
+                        setTimeout(() => {
+                            refreshBtn.innerHTML = "<span style='color: #57cbde;'>🔄 Rafraîchir SCE</span>";
+                        }, 3000);
+                    }
+                };
+                target.prepend(refreshBtn);
+            }
+        }
     };
 
     /**
@@ -616,6 +1020,102 @@ ES_log("[getPageAppids] Entrée fonction");
                 await win.ES.saveToCache();
             }
             return;
+        }
+
+        // --- MODE FALLBACK: API indisponible, utilisation du fetch SCE direct ---
+        ES_log('[Workflow] API indisponible, mode fetch SCE direct (fallback).');
+
+        // --- CAS A: PAGE INDIVIDUELLE (GAMECARDS) ---
+        if (currentUrl.includes('/gamecards/')) {
+            const appIdMatch = currentUrl.match(/gamecards\/(\d+)/);
+            if (appIdMatch) {
+                const appId = appIdMatch[1];
+                ES_log(`[Workflow-SCE] Mode fetch SCE pour l'AppID : ${appId}`);
+
+                // Afficher le cache immédiatement
+                if (win.ES.injectQuickTradeButtons) {
+                    win.ES.injectQuickTradeButtons(appId);
+                    win.ES.renderGamecardStatus(appId);
+                }
+
+                // Fetch SCE en arrière-plan
+                try {
+                    await win.ES.fetchSCEFresh(appId);
+                    if (win.ES.analyzeBadgeStatus) {
+                        win.ES.analyzeBadgeStatus(appId);
+                    }
+                    await win.ES.saveToCache(appId);
+
+                    // Re-render avec les nouvelles données
+                    if (win.ES.injectQuickTradeButtons) {
+                        win.ES.injectQuickTradeButtons(appId);
+                        win.ES.renderGamecardStatus(appId);
+                    }
+                    ES_log(`[Workflow-SCE] AppID ${appId} mis à jour via SCE.`);
+                } catch (e) {
+                    console.warn(`[Workflow-SCE] Erreur fetch SCE pour ${appId}:`, e);
+                }
+                return;
+            }
+        }
+
+        // --- CAS B: PAGE DES BADGES ---
+        if (currentUrl.includes('/badges')) {
+            const itemsOnPage = getPageAppids();
+            const appidsOnPage = itemsOnPage.map(i => i.appid);
+
+            // --- UI: statut SCE ---
+            const xpBlock = document.querySelector("#responsive_page_template_content > div > div.maincontent > div.profile_xp_block");
+            if (xpBlock && !document.getElementById('es-status-text')) {
+                const statusContainer = document.createElement('div');
+                statusContainer.style.cssText = "font-size: 11px; color: #8ed6fb; margin-top: 10px; border-top: 1px solid #333; padding-top: 5px;";
+                statusContainer.innerHTML = `
+            <span style="color: #57cbde; font-weight: bold;">Crédit SCE : </span>
+            <span id="es-status-text">Initialisation...</span>
+            <br>
+            <span style="color: #57cbde; font-weight: bold;">File d'attente : </span>
+            <span id="es-status-queue">--</span>
+            <span style="color: #57cbde; font-weight: bold; margin-left: 10px;">Wait Time : </span>
+            <span id="es-status-waittime">--</span>
+        `;
+                xpBlock.appendChild(statusContainer);
+            }
+
+            const statusEl = document.getElementById('es-status-text');
+            const updateStatus = (txt) => {
+                if (statusEl) {
+                    const credit = win.ES.DATA.scecredit !== undefined ? `${win.ES.DATA.scecredit}c` : '--';
+                    statusEl.innerHTML = `<span style="color:#fff">${credit}</span> ${txt}`;
+                }
+                const queueEl = document.getElementById('es-status-queue');
+                if (queueEl) {
+                    const pending = win.ES.DATA.scePendingOffers !== undefined ? win.ES.DATA.scePendingOffers : '--';
+                    queueEl.innerHTML = `<span style="color:#fff">${pending}</span> offre(s)`;
+                }
+                const waitEl = document.getElementById('es-status-waittime');
+                if (waitEl) {
+                    const wait = win.ES.DATA.sceWaitTime !== undefined ? `${win.ES.DATA.sceWaitTime} min` : '--';
+                    waitEl.innerHTML = `<span style="color:#fff">${wait}</span>`;
+                }
+            };
+
+            // 1. Afficher le cache immédiatement
+            appidsOnPage.forEach(id => {
+                if (win.ES.analyzeBadgeStatus) win.ES.analyzeBadgeStatus(id);
+                win.ES.updateBadgeUI(id);
+            });
+            updateStatus("⚡ Cache local (SCE fetch en cours...)");
+
+            // 2. Fetch infos globales SCE (credit, pending offers)
+            try {
+                await win.ES.fetchSCEGlobalInfo();
+                updateStatus("🔄 Récupération SCE...");
+            } catch (e) {
+                console.warn('[Workflow-SCE] Erreur fetch global info:', e);
+            }
+
+            // 3. Sauvegarder le cache
+            await win.ES.saveToCache();
         }
     }
 
