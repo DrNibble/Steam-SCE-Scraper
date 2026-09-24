@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam-Gamecards-SCE based on API
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @description  Scrap complet Steam & SCE avec cache persistant, workers et API REST
 // @author       DrNibble
 // @match        https://steamcommunity.com/profiles/*/badges*
@@ -345,7 +345,7 @@
                 tradeLink = 'https://www.steamcardexchange.net' + (tradeLink.startsWith('/') ? '' : '/') + tradeLink;
             }
 
-            inventoryMap[win.ES.clean(name, true)] = { stock, worth, price, quickTrade: tradeLink };
+            inventoryMap[win.ES.clean(name, true)] = { stock, worth, price, quickTrade: tradeLink, originalName: name };
         });
 
         ES_log(`[fetchSCEInventory] ${Object.keys(inventoryMap).length} cartes trouvées pour appid ${appid}.`);
@@ -390,7 +390,49 @@
 
         // 4. Fusion dans les cartes existantes (non-destructif: préserve les valeurs si SCE ne retourne pas une carte)
         const data = win.ES.DATA[appid];
-        if (data && data.cards) {
+
+        // FALLBACK: Si aucune carte n'existe (appid absent de l'API), on crée les cartes
+        // à partir des données SCE (inventory map + market prices).
+        if (data && (!data.cards || data.cards.length === 0)) {
+            const allNames = new Set([
+                ...Object.keys(marketPrices),
+                ...(inventoryMap ? Object.keys(inventoryMap) : [])
+            ]);
+            if (allNames.size > 0) {
+                ES_log(`[fetchSCEFresh] Appid ${appid} absent de l'API — création de ${allNames.size} carte(s) depuis SCE.`);
+                data.cards = [...allNames].map((normName, i) => {
+                    // Retrouver le nom original depuis l'inventory map (non normalisé)
+                    let originalName = normName;
+                    if (inventoryMap) {
+                        const invEntry = Object.entries(inventoryMap).find(([k]) => k === normName);
+                        if (invEntry) originalName = invEntry[1].originalName || normName;
+                    }
+                    const inv = inventoryMap && inventoryMap[normName];
+                    return {
+                        name: originalName,
+                        qty: 0,
+                        index: i,
+                        inv: [],
+                        hash: `${appid}-${originalName}`,
+                        iconUrl: '',
+                        artUrl: '',
+                        "sce stock": inv ? inv.stock : 0,
+                        "sce worth": inv ? inv.worth : 0,
+                        "sce price": inv ? inv.price : 0,
+                        "sce marketPriceUSD": marketPrices[normName] || 0,
+                        steamMarketPriceEur: marketPrices[normName] ? Math.round(marketPrices[normName] * 0.92 * 100) / 100 : null,
+                        steamMarketSales7d: null,
+                        steamMarketSellPriceEur: null,
+                        steamMarketSellQty: null,
+                        steamMarketBuyOrderEur: null,
+                        steamMarketBuyOrderQty: null,
+                        "sce quick-trade": inv ? (inv.quickTrade || "") : ""
+                    };
+                });
+            }
+        }
+
+        if (data && data.cards && data.cards.length > 0) {
             data.cards = data.cards.map(card => {
                 const normName = win.ES.clean(card.name, true);
                 const hasInv = inventoryMap && Object.prototype.hasOwnProperty.call(inventoryMap, normName);
@@ -1075,9 +1117,49 @@ ES_log("[getPageAppids] Entrée fonction");
 
     // Les résultats sont rendus par React (pagination/filtres sans rechargement) :
     // on ré-applique le rendu à chaque mutation du DOM (debounce).
+    // FALLBACK: détecte les appids manquants de l'API et fetch SCE en arrière-plan.
     win.ES.watchMarketSearch = function() {
         let timer = null;
-        const run = () => { timer = null; win.ES.renderMarketSearchSCE(); };
+        const fetchedFallback = new Set(); // appids déjà fetchés en fallback
+
+        const collectMissingAppids = () => {
+            const links = document.querySelectorAll('a[href*="/market/listings/753/"]');
+            const missing = new Set();
+            links.forEach(a => {
+                const m = a.getAttribute('href').match(/\/market\/listings\/753\/([^?#]+)/);
+                if (!m) return;
+                const hash = (() => { try { return decodeURIComponent(m[1]); } catch { return m[1]; } })();
+                const dash = hash.indexOf('-');
+                if (dash <= 0) return;
+                const appid = hash.slice(0, dash);
+                if (fetchedFallback.has(appid)) return;
+                const game = win.ES.DATA[appid];
+                if (!game || !game.cards || game.cards.length === 0) {
+                    missing.add(appid);
+                }
+            });
+            return [...missing];
+        };
+
+        const runFallback = async () => {
+            const missing = collectMissingAppids();
+            if (missing.length === 0) return;
+            ES_log(`[watchMarketSearch] ${missing.length} appid(s) absent(s) de l'API — fallback SCE.`);
+            for (const appid of missing) {
+                fetchedFallback.add(appid); // marquer comme en cours
+                try {
+                    ES_log(`[watchMarketSearch] Fallback fetchSCEFresh pour appid ${appid}...`);
+                    await win.ES.fetchSCEFresh(appid);
+                    await win.ES.saveToCache(appid);
+                    win.ES.renderMarketSearchSCE(); // re-render après chaque fetch
+                    ES_log(`[watchMarketSearch] Appid ${appid} fetché via SCE fallback.`);
+                } catch (e) {
+                    console.warn(`[watchMarketSearch] Erreur fallback SCE pour ${appid}:`, e);
+                }
+            }
+        };
+
+        const run = () => { timer = null; win.ES.renderMarketSearchSCE(); runFallback(); };
         run();
         new MutationObserver(() => {
             if (!timer) timer = setTimeout(run, 300);
