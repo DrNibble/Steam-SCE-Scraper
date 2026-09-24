@@ -658,7 +658,18 @@ ES_log("[getPageAppids] Entrée fonction");
             const ownedText = info.isOwned ? " (Possédée 💰)" : " (Manquante 💸)";
             // Vert si possédée, Orange si elle bloque le badge
             const color = info.isOwned ? '#a3d200' : '#e67e22';
-            createStatusLabel(statusContainer, color, `💎 ${info.cardname} (${info.marketeurprice != null ? info.marketeurprice.toFixed(2) + '€' : 'N/A'})${ownedText}`);
+
+            // Prix: prioriser marketeurprice (API), sinon fallback sur sce marketPriceUSD
+            let displayPrice = info.marketeurprice;
+            if (displayPrice == null) {
+                const card = data.cards && data.cards.find(c => c.name && c.name.trim().toLowerCase() === info.cardname.trim().toLowerCase());
+                const priceUSD = card ? parseFloat(card["sce marketPriceUSD"]) || 0 : 0;
+                if (priceUSD > 0) {
+                    displayPrice = Math.round(priceUSD * 0.92 * 100) / 100;
+                }
+            }
+
+            createStatusLabel(statusContainer, color, `💎 ${info.cardname} (${displayPrice != null ? displayPrice.toFixed(2) + '€' : 'N/A'})${ownedText}`);
         }
     };
 
