@@ -361,6 +361,8 @@ async function processCard(item) {
     db.prepare('UPDATE market_queue SET status = ?, attempts = attempts + 1 WHERE id = ?')
         .run('processing', item.id);
 
+    ES_log(`[processCard] ${item.hash}: fetch marché en cours...`);
+
     try {
         const marketHashName = item.hash;
 
@@ -457,17 +459,20 @@ async function processCard(item) {
         return { success: true, priceEur, lastSalePriceEur, sellPriceEur, sellQty, buyOrderEur, buyOrderQty, sales7d };
 
     } catch (err) {
+        // Message d'erreur robuste (err peut ne pas être une Error)
+        const msg = String(err && err.message ? err.message : err);
+
         // Si 429, le token bucket va gérer le cooldown
-        if (err.message.includes('429')) {
+        if (msg.includes('429')) {
             bucket.hitRateLimit();
         }
 
-        ES_log(`[processCard] Erreur ${item.hash}: ${err.message}`);
+        ES_log(`[processCard] Erreur ${item.hash}: ${msg}`);
 
         db.prepare('UPDATE market_queue SET status = ?, error = ? WHERE id = ?')
-            .run(item.attempts >= CONFIG.MAX_RETRIES ? 'error' : 'pending', err.message.substring(0, 200), item.id);
+            .run(item.attempts >= CONFIG.MAX_RETRIES ? 'error' : 'pending', msg.substring(0, 200), item.id);
 
-        return { success: false, error: err.message };
+        return { success: false, error: msg };
     }
 }
 
@@ -502,8 +507,9 @@ export function startMarketWorker(options = {}) {
         ES_log('[MarketQueue] Worker démarré');
 
         while (workerRunning) {
+            let next = null;
             try {
-                const next = dequeueNext();
+                next = dequeueNext();
 
                 if (!next) {
                     // Queue vide : attendre
@@ -543,7 +549,21 @@ export function startMarketWorker(options = {}) {
                 }
 
             } catch (err) {
-                ES_log(`[MarketQueue] Erreur worker: ${err.message}`);
+                errors++;
+                const msg = String(err && err.message ? err.message : err);
+                ES_log(`[MarketQueue] Erreur worker sur ${next ? next.hash : '?'}: ${msg}`);
+
+                // Remettre la carte en pending (ou error après max retries) pour
+                // ne pas laisser de job zombie en statut 'processing'
+                if (next) {
+                    try {
+                        const db = getDB();
+                        const attempts = (next.attempts || 0) + 1;
+                        db.prepare('UPDATE market_queue SET status = ?, attempts = ? WHERE id = ?')
+                            .run(attempts >= CONFIG.MAX_RETRIES ? 'error' : 'pending', attempts, next.id);
+                    } catch { /* ignore les erreurs de re-queue */ }
+                }
+
                 await sleep(1000);
             }
         }

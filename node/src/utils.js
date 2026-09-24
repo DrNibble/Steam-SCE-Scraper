@@ -82,7 +82,8 @@ export async function httpGet(url, { cookies = '', retries = 3, accept = 'text/h
 
     for (let attempt = 0; attempt <= retries; attempt++) {
         try {
-            const response = await fetch(url, { headers, redirect: 'follow' });
+            // Timeout 30s: sans lui, un fetch qui pend bloque le worker market indéfiniment
+            const response = await fetch(url, { headers, redirect: 'follow', signal: AbortSignal.timeout(30000) });
 
             if (!response.ok) {
                 if (attempt < retries && [429, 500, 502, 503].includes(response.status)) {
