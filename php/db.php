@@ -51,6 +51,15 @@ function getAllGames(SQLite3 $db): array {
 }
 
 /**
+ * Nettoie le suffixe " (Trading Card)" du hash pour l'affichage
+ * (le hash en DB reste brut avec le suffixe, pour les appels API Steam Market)
+ */
+function cleanHash(?string $hash): ?string {
+    if ($hash === null) return null;
+    return preg_replace('/\s*\(trading card\)\s*/i', '', $hash);
+}
+
+/**
  * Recupere les cartes d un jeu
  */
 function getCardsForGame(SQLite3 $db, string $appid): array {
@@ -60,6 +69,7 @@ function getCardsForGame(SQLite3 $db, string $appid): array {
     $cards = [];
     while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
         $row['inv'] = json_decode($row['inv_json'] ?? '[]', true);
+        $row['hash'] = cleanHash($row['hash'] ?? null);
         $cards[] = $row;
     }
     return $cards;
