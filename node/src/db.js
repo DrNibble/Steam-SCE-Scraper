@@ -130,6 +130,11 @@ export function initDB() {
         'ALTER TABLE games ADD COLUMN badge_crafted_fetched_at INTEGER',
         // Lien de trade rapide SCE (href du bouton btn-primary sur la page inventory)
         'ALTER TABLE cards ADD COLUMN sce_quick_trade TEXT',
+        // Sell/buy order columns (deja dans CREATE TABLE mais absentes des anciennes bases)
+        'ALTER TABLE cards ADD COLUMN steam_market_sell_price_eur REAL',
+        'ALTER TABLE cards ADD COLUMN steam_market_sell_qty INTEGER',
+        'ALTER TABLE cards ADD COLUMN steam_market_buy_order_eur REAL',
+        'ALTER TABLE cards ADD COLUMN steam_market_buy_order_qty INTEGER',
     ];
     for (const sql of migrations) {
         try { db.exec(sql); } catch { /* colonne deja presente */ }
@@ -242,7 +247,7 @@ export function upsertCards(appid, cards) {
     // Avant de supprimer/reinserer, on sauvegarde les prix marche Steam existants
     // pour ne pas les perdre (ils sont recuperes separement via fetchSteamMarketPrices)
     const existingPrices = {};
-    const existingRows = db.prepare('SELECT hash, steam_market_price_eur, steam_market_last_sale_price_eur, steam_market_sales_7d, steam_market_fetched_at FROM cards WHERE appid = ?').all(String(appid));
+    const existingRows = db.prepare('SELECT hash, steam_market_price_eur, steam_market_last_sale_price_eur, steam_market_sales_7d, steam_market_fetched_at, steam_market_sell_price_eur, steam_market_sell_qty, steam_market_buy_order_eur, steam_market_buy_order_qty FROM cards WHERE appid = ?').all(String(appid));
     for (const row of existingRows) {
         if (row.hash) {
             existingPrices[row.hash] = {
@@ -250,6 +255,10 @@ export function upsertCards(appid, cards) {
                 lastSalePrice: row.steam_market_last_sale_price_eur,
                 sales: row.steam_market_sales_7d,
                 fetchedAt: row.steam_market_fetched_at,
+                sellPriceEur: row.steam_market_sell_price_eur,
+                sellQty: row.steam_market_sell_qty,
+                buyOrderEur: row.steam_market_buy_order_eur,
+                buyOrderQty: row.steam_market_buy_order_qty,
             };
         }
     }
@@ -258,10 +267,12 @@ export function upsertCards(appid, cards) {
         INSERT INTO cards (appid, name, card_index, qty, hash, icon_url, art_url, inv_json,
             sce_stock, sce_worth, sce_price, sce_market_price_usd,
             steam_market_price_eur, steam_market_last_sale_price_eur, steam_market_sales_7d, steam_market_fetched_at,
+            steam_market_sell_price_eur, steam_market_sell_qty, steam_market_buy_order_eur, steam_market_buy_order_qty,
             sce_quick_trade)
         VALUES (@appid, @name, @card_index, @qty, @hash, @icon_url, @art_url, @inv_json,
             @sce_stock, @sce_worth, @sce_price, @sce_market_price_usd,
             @steam_market_price_eur, @steam_market_last_sale_price_eur, @steam_market_sales_7d, @steam_market_fetched_at,
+            @steam_market_sell_price_eur, @steam_market_sell_qty, @steam_market_buy_order_eur, @steam_market_buy_order_qty,
             @sce_quick_trade)
         ON CONFLICT(appid, hash) DO UPDATE SET
             name=@name, card_index=@card_index, qty=@qty, icon_url=@icon_url, art_url=@art_url,
@@ -271,6 +282,10 @@ export function upsertCards(appid, cards) {
             steam_market_last_sale_price_eur=COALESCE(@steam_market_last_sale_price_eur, steam_market_last_sale_price_eur),
             steam_market_sales_7d=COALESCE(@steam_market_sales_7d, steam_market_sales_7d),
             steam_market_fetched_at=COALESCE(@steam_market_fetched_at, steam_market_fetched_at),
+            steam_market_sell_price_eur=COALESCE(@steam_market_sell_price_eur, steam_market_sell_price_eur),
+            steam_market_sell_qty=COALESCE(@steam_market_sell_qty, steam_market_sell_qty),
+            steam_market_buy_order_eur=COALESCE(@steam_market_buy_order_eur, steam_market_buy_order_eur),
+            steam_market_buy_order_qty=COALESCE(@steam_market_buy_order_qty, steam_market_buy_order_qty),
             sce_quick_trade=@sce_quick_trade
     `);
 
@@ -286,6 +301,10 @@ export function upsertCards(appid, cards) {
             const cardLastSalePrice = card.steamMarketLastSalePriceEur ?? card.steam_market_last_sale_price_eur ?? null;
             const cardSales = card.steamMarketSales7d ?? card.steam_market_sales_7d ?? null;
             const cardFetchedAt = card.steamMarketFetchedAt ?? card.steam_market_fetched_at ?? null;
+            const cardSellPrice = card.steamMarketSellPriceEur ?? card.steam_market_sell_price_eur ?? null;
+            const cardSellQty = card.steamMarketSellQty ?? card.steam_market_sell_qty ?? null;
+            const cardBuyOrderEur = card.steamMarketBuyOrderEur ?? card.steam_market_buy_order_eur ?? null;
+            const cardBuyOrderQty = card.steamMarketBuyOrderQty ?? card.steam_market_buy_order_qty ?? null;
 
             stmt.run({
                 appid: appidStr,
@@ -305,6 +324,10 @@ export function upsertCards(appid, cards) {
                 steam_market_last_sale_price_eur: cardLastSalePrice ?? existing?.lastSalePrice ?? null,
                 steam_market_sales_7d: cardSales ?? existing?.sales ?? 0,
                 steam_market_fetched_at: cardFetchedAt ?? existing?.fetchedAt ?? null,
+                steam_market_sell_price_eur: cardSellPrice ?? existing?.sellPriceEur ?? null,
+                steam_market_sell_qty: cardSellQty ?? existing?.sellQty ?? null,
+                steam_market_buy_order_eur: cardBuyOrderEur ?? existing?.buyOrderEur ?? null,
+                steam_market_buy_order_qty: cardBuyOrderQty ?? existing?.buyOrderQty ?? null,
                 sce_quick_trade: card['sce quick-trade'] || null,
             });
         }

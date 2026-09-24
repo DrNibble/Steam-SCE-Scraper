@@ -552,6 +552,14 @@ export async function fetchSCEFresh(appid) {
             // Prix SCE converti en EUR, stocke dans steam_market_price_eur
             // (null si pas de prix -> conserve la valeur existante en DB)
             steamMarketPriceEur: priceUSD > 0 ? Math.round(priceUSD * usdToEur * 100) / 100 : null,
+            // Preserver les prix marche Steam existants (mis a jour par fetchMarketPricesV2)
+            steamMarketLastSalePriceEur: dbCard.steam_market_last_sale_price_eur,
+            steamMarketSales7d: dbCard.steam_market_sales_7d,
+            steamMarketFetchedAt: dbCard.steam_market_fetched_at,
+            steamMarketSellPriceEur: dbCard.steam_market_sell_price_eur,
+            steamMarketSellQty: dbCard.steam_market_sell_qty,
+            steamMarketBuyOrderEur: dbCard.steam_market_buy_order_eur,
+            steamMarketBuyOrderQty: dbCard.steam_market_buy_order_qty,
             'sce quick-trade': invData.quickTrade || ''
         };
     });

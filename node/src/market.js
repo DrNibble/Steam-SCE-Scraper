@@ -531,13 +531,15 @@ export async function fetchMarketPricesV2(appid, delayMs = 500) {
             const result = await resolveCardPrice(card, 7);
 
             priceMap.set(card.hash, {
-                priceEur: result.priceEur,
+                priceEur: result.priceEur !== null && result.priceEur !== undefined
+                    ? Math.round(result.priceEur * 100) / 100 : null,
                 sales7d: result.sales7d || 0,
-                lastSalePriceEur: result.lastSalePriceEur ?? null,
+                lastSalePriceEur: result.lastSalePriceEur !== null && result.lastSalePriceEur !== undefined
+                    ? Math.round(result.lastSalePriceEur * 100) / 100 : null,
             });
 
             ES_log(`[fetchMarketPricesV2] → ${result.source}: ${
-                result.priceEur !== null ? result.priceEur + '€' : 'N/A'
+                result.priceEur !== null ? (Math.round(result.priceEur * 100) / 100) + '€' : 'N/A'
             } (${result.reason})`);
         } catch (err) {
             ES_log(`[fetchMarketPricesV2] Erreur pour ${card.hash}: ${err.message}`);

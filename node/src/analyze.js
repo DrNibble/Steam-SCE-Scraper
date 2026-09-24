@@ -15,6 +15,9 @@ export function analyzeBadgeStatus(appid) {
     if (!dbCards || dbCards.length === 0) return null;
 
     // Convertit les rows DB en objets cartes
+    // Inclut TOUS les champs prix marche Steam pour que upsertCards les preservent
+    // (analyzeBadgeStatus est appele APRES fetchMarketPricesV2 en phase 2 :
+    //  sans ces champs, upsertCards DELETE/re-INSERT et perd les valeurs)
     const cards = dbCards.map(c => ({
         name: c.name,
         qty: c.qty,
@@ -27,7 +30,13 @@ export function analyzeBadgeStatus(appid) {
         'sce marketPriceUSD': c.sce_market_price_usd,
         'sce quick-trade': c.sce_quick_trade,
         steamMarketPriceEur: c.steam_market_price_eur,
+        steamMarketLastSalePriceEur: c.steam_market_last_sale_price_eur,
         steamMarketSales7d: c.steam_market_sales_7d,
+        steamMarketFetchedAt: c.steam_market_fetched_at,
+        steamMarketSellPriceEur: c.steam_market_sell_price_eur,
+        steamMarketSellQty: c.steam_market_sell_qty,
+        steamMarketBuyOrderEur: c.steam_market_buy_order_eur,
+        steamMarketBuyOrderQty: c.steam_market_buy_order_qty,
     }));
 
     // --- 1. CALCULS PREALABLES ---
