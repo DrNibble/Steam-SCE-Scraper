@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam-Gamecards-SCE based on API
 // @namespace    http://tampermonkey.net/
-// @version      0.1
+// @version      0.2
 // @description  Scrap complet Steam & SCE avec cache persistant, workers et API REST
 // @author       DrNibble
 // @match        https://steamcommunity.com/profiles/*/badges*
@@ -10,6 +10,7 @@
 // @match        https://steamcommunity.com/my/gamecards*
 // @match        https://steamcommunity.com/profiles/*/inventory*
 // @match        https://steamcommunity.com/my/inventory*
+// @match        https://steamcommunity.com/market/search*
 
 // @grant        GM.xmlHttpRequest
 // @grant        GM.setValue
@@ -1008,6 +1009,82 @@ ES_log("[getPageAppids] Entrée fonction");
     };
 
     /**
+     * PAGE RECHERCHE MARCHÉ (/market/search)
+     * Ajoute la valeur "sce worth" dans le span "Quantité à vendre : N" de chaque
+     * résultat, uniquement si le bot SCE a plus d'1 exemplaire ("sce stock" > 1).
+     * Les classes CSS Steam sont générées (instables) : on repère le span par son
+     * texte et la carte via le lien /market/listings/753/<appid>-<nom>.
+     */
+    win.ES.renderMarketSearchSCE = function() {
+        // Index des cartes : "appid|nom normalisé" -> carte
+        const index = new Map();
+        for (const [appid, game] of Object.entries(win.ES.DATA)) {
+            if (isNaN(appid) || !game || !Array.isArray(game.cards)) continue;
+            for (const c of game.cards) {
+                if (c && c.name) index.set(`${appid}|${win.ES.clean(c.name, true)}`, c);
+            }
+        }
+
+        const links = document.querySelectorAll('a[href*="/market/listings/753/"]');
+        links.forEach(a => {
+            const m = a.getAttribute('href').match(/\/market\/listings\/753\/([^?#]+)/);
+            if (!m) return;
+            let hash;
+            try { hash = decodeURIComponent(m[1]); } catch { hash = m[1]; }
+            const dash = hash.indexOf('-');
+            if (dash <= 0) return;
+            const appid = hash.slice(0, dash);
+            const name = hash.slice(dash + 1).replace(/\s*\(trading card\)\s*$/i, '');
+            const card = index.get(`${appid}|${win.ES.clean(name, true)}`);
+
+            // Span "Quantité à vendre : N" (FR) / "Quantity: N" (EN)
+            const qtySpan = [...a.querySelectorAll('span')].find(sp =>
+                /^(Quantit[ée] à vendre|Quantity)/i.test(sp.textContent.trim()) &&
+                sp.children.length >= 1 && sp.firstElementChild.tagName === 'SPAN');
+            if (!qtySpan) return;
+
+            // Déjà traité pour cette carte : rien à faire (le DOM React peut être recyclé)
+            const existing = qtySpan.querySelector('.es-sce-worth');
+            if (existing && existing.dataset.hash === hash) return;
+            if (existing) existing.remove();
+
+            const stock = card ? (parseInt(card["sce stock"], 10) || 0) : 0;
+            if (!card || stock <= 1) return;
+
+            const worth = card["sce worth"] ?? 0;
+            const el = document.createElement('span');
+            el.className = 'es-sce-worth';
+            el.dataset.hash = hash;
+            el.style.cssText = 'color:#57cbde;font-weight:bold;margin-left:6px;white-space:nowrap;';
+            el.textContent = `· SCE ${worth}c (${stock})`;
+            el.title = `SCE : ${stock} en stock, valeur ${worth} crédits`;
+            const quickTradeUrl = card["sce quick-trade"];
+            if (quickTradeUrl) {
+                el.style.cursor = 'pointer';
+                el.style.textDecoration = 'underline';
+                el.title += ' — clic : Quick-Trade SCE';
+                el.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    window.open(quickTradeUrl, '_blank');
+                };
+            }
+            qtySpan.appendChild(el);
+        });
+    };
+
+    // Les résultats sont rendus par React (pagination/filtres sans rechargement) :
+    // on ré-applique le rendu à chaque mutation du DOM (debounce).
+    win.ES.watchMarketSearch = function() {
+        let timer = null;
+        const run = () => { timer = null; win.ES.renderMarketSearchSCE(); };
+        run();
+        new MutationObserver(() => {
+            if (!timer) timer = setTimeout(run, 300);
+        }).observe(document.body, { childList: true, subtree: true });
+    };
+
+    /**
      * WORKFLOW PRINCIPAL
      */
     async function mainWorkflow() {
@@ -1023,6 +1100,13 @@ ES_log("[getPageAppids] Entrée fonction");
         //    L'API est la source de verite: si elle est disponible, les donnees
         //    remplacent le cache local. Sinon, le cache local est utilise tel quel.
         const apiAvailable = await win.ES.fetchAPIData();
+
+        // --- CAS 0: PAGE RECHERCHE MARCHÉ (API si dispo, sinon cache local) ---
+        if (currentUrl.includes('/market/search')) {
+            ES_log(`[Workflow] Page recherche marché (${apiAvailable ? 'API' : 'cache local'}).`);
+            win.ES.watchMarketSearch();
+            return;
+        }
 
         if (apiAvailable) {
             // --- MODE API: les donnees viennent du backend, pas besoin de scraper ---
