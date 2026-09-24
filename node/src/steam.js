@@ -300,11 +300,9 @@ export async function fillInventoryData(cards, profileLink = null) {
                 const itemAppId = desc.market_fee_app || (appidTag ? appidTag.internal_name.replace('app_', '') : null);
 
                 if (itemAppId && desc.market_hash_name) {
-                    const cleanMarketHash = desc.market_hash_name
-                        .replace(/\s*\(trading card\)\s*/gi, '')
-                        .trim();
-
-                    const card = cards.find(c => c.hash === cleanMarketHash);
+                    // Ne pas nettoyer le market_hash_name : on le stocke tel quel
+                    // pour correspondre au hash en DB (format market_hash_name complet)
+                    const card = cards.find(c => c.hash === desc.market_hash_name);
                     if (card) {
                         if (!card.inv.some(i => i.id === item.id)) {
                             card.inv.push({ id: item.id, pos: item.pos });
@@ -445,15 +443,14 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
 
         if (data.eresult !== 1 || !data.badgedata) return null;
 
-        // Initialisation des cartes avec nettoyage du hash
+        // Initialisation des cartes - hash = market_hash_name brut (sans nettoyage)
         const cards = data.badgedata.rgCards.map((card, index) => {
-            const cleanHash = card.markethash.replace(/\s*\(trading card\)\s*/gi, '').trim();
             return {
                 name: card.name,
                 qty: card.owned || 0,  // Fix: le script original avait un bug (card.owned || 0, 10) qui donnait toujours 10
                 index: index,
                 inv: [],
-                hash: cleanHash,
+                hash: card.markethash,
                 iconUrl: card.imgurl,
                 artUrl: card.arturl
             };
@@ -736,7 +733,7 @@ export async function fetchSteamMarketPrices(appid) {
     for (const card of cards) {
         if (!card.hash) continue;
 
-        // Le hash en DB est deja au format market_hash_name (ex: 1021770-jiao)
+        // Le hash en DB est le market_hash_name complet (ex: "1021770-jiao (Trading Card)")
         const marketHashName = card.hash;
         const encodedName = encodeURIComponent(marketHashName);
 
