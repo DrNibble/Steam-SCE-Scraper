@@ -487,7 +487,7 @@ async function fetchSCEInventory(appid) {
 export async function fetchSCEFresh(appid) {
     if (isSteamEvent(appid)) return null;
 
-    ES_log(`[fetchSCEFresh] START ${appid}`);
+    //ES_log(`[fetchSCEFresh] START ${appid}`);
 
     // Recupere les infos globales (credit, pending offers)
     await fetchSCEGlobalInfo();
@@ -519,7 +519,7 @@ export async function fetchSCEFresh(appid) {
         return null;
     }
     const gamePriceMap = parseSCEGamePrices(gamePageHtml);
-    ES_log(`[fetchSCEFresh] ${Object.keys(gamePriceMap).length} prix USD extraits de la gamepage.`);
+   // ES_log(`[fetchSCEFresh] ${Object.keys(gamePriceMap).length} prix USD extraits de la gamepage.`);
 
     // 2. Inventaire SCE
     const inventoryMap = await fetchSCEInventory(appid);
