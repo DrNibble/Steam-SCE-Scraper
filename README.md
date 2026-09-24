@@ -10,7 +10,7 @@ steam-sce/
 │   ├── .env.example       # Configuration (cookies, chemin DB)
 │   ├── package.json
 │   └── src/
-│       ├── db.js          # Couche SQLite (schema, CRUD)
+│       ├── db.js          # Couche SQLite (schema, CRUD, migrations)
 │       ├── utils.js       # Utilitaires (HTTP, clean, isSteamEvent, etc.)
 │       ├── steam.js       # Scraping Steam (badges, inventaire, historique trades)
 │       ├── sce.js         # Scraping Steam Card Exchange (prix, stock, credits, refresh periodique)
@@ -64,6 +64,8 @@ Editez le fichier `.env` et renseignez vos cookies de session :
 ```bash
 npm run init-db
 ```
+
+La base est initialisée automatiquement au chargement du module `db.js`. Les migrations (`ALTER TABLE`) s'exécutent au démarrage pour ajouter les colonnes manquantes aux bases existantes (voir [Migrations](#migrations)).
 
 ## Utilisation
 
@@ -124,7 +126,9 @@ Le scan des badges (`npm run sync:badges`, scan initial du daemon) fonctionne en
 
 - Parcourt **toutes les pages de badges** du profil (`?p=1`, `?p=2`, ...) : le nombre de pages est detecte automatiquement (liens de pagination + "Showing X-Y of Z badges"). Le resultat est mis en cache 1h (voir [Caches anti rate-limit](#caches-anti-rate-limit-steam))
 - Pour chaque appid : `fetchSteamData` (cartes du set + inventaire, reutilise la DB si fetchee il y a moins de 30 min) puis `fetchSCEFresh` (sce_stock, sce_price, sce_worth, sce_quick_trade, cartes possedees / manquantes / doublons)
+- Le hash stocké en DB est le `market_hash_name` brut renvoyé par l'API Steam `ajaxgetbadgeinfo` (ex: `664320-Loki (Trading Card)`) — aucun nettoyage n'est appliqué (voir [Format du hash](#format-du-hash))
 - Les prix USD des cartes sont extraits de la gamepage SCE (section "Trading Cards" uniquement) : stockes dans `sce_market_price_usd`, convertis en EUR et stockes dans `steam_market_price_eur`
+- `fetchSCEFresh` préserve tous les champs de prix marché existants en DB lors de l'appel à `upsertCards` (les champs sont explicitement passés depuis `dbCard`, en plus du mécanisme de fallback `existingPrices`)
 - S'execute en **4 taches paralleles** si le `waitTime` SCE est < 1 minute, sinon sequentiellement (1 tache)
 
 Si le bot SCE est sature (`waitTime` > 1 min ET `pendingOffers` > 10), `fetchSCEFresh` retourne null : le badge est differe (meta `sceDeferredAppids`) et retente au prochain cycle de 5 minutes du daemon.
@@ -133,8 +137,38 @@ Si le bot SCE est sature (`waitTime` > 1 min ET `pendingOffers` > 10), `fetchSCE
 
 Executee **apres** la phase 1, uniquement sur les appids mis a jour avec succes en DB (`dbReadyAppids`) - les appids deferes par le bot SCE n'y passent qu'apres un cycle de retry reussi -, sequentiellement (appid par appid) :
 
-1. `fetchMarketPricesV2` (market.js) affine `steam_market_price_eur` avec le prix reel du marche (derniere vente < 7j, sinon buy order) - la valeur EUR posee par la phase 1 est preservee si le marche n'a pas de prix. **Limite 24h** : une carte dont le prix a ete fetche il y a moins de 24h (`cards.steam_market_fetched_at`) est ignoree, aucune requete n'est faite (voir [Limite 24h des prix marche](#limite-24h-des-prix-marche))
-2. `analyzeBadgeStatus` recalcule les indicateurs de completion
+1. `fetchMarketPricesV2` (market.js) affine `steam_market_price_eur` avec le prix reel du marche (derniere vente < 7j, sinon buy order) - la valeur EUR posee par la phase 1 est preservee si le marche n'a pas de prix. Les prix (`priceEur` et `lastSalePriceEur`) sont **arrondis à 2 décimales** (format #,##) avant écriture en DB. **Limite 24h** : une carte dont le prix a ete fetche il y a moins de 24h (`cards.steam_market_fetched_at`) est ignoree, aucune requete n'est faite (voir [Limite 24h des prix marche](#limite-24h-des-prix-marche))
+2. `analyzeBadgeStatus` recalcule les indicateurs de completion. Tous les champs de prix marché sont explicitement passés à `upsertCards` (y compris `steamMarketLastSalePriceEur`, `steamMarketFetchedAt`, `steamMarketSellPriceEur`, `steamMarketSellQty`, `steamMarketBuyOrderEur`, `steamMarketBuyOrderQty`) pour éviter toute perte de données lors du cycle DELETE/INSERT de `upsertCards`
+
+## Format du hash
+
+Le hash stocké dans la colonne `cards.hash` est le `market_hash_name` brut tel que renvoyé par l'API Steam `ajaxgetbadgeinfo` (endpoint `ajaxgetbadgeinfo/:appid`). Aucun nettoyage n'est appliqué : le suffixe "(Trading Card)" est conservé.
+
+Exemples :
+- `664320-Loki (Trading Card)`
+- `485450-Spikes (Trading Card)`
+
+Ce format correspond exactement au `market_hash_name` attendu par les endpoints du Steam Community Market (`priceoverview`, `pricehistory`, `orderbook`, listing page). Le matching d'inventaire dans `fillInventoryData` utilise également le `market_hash_name` brut pour correspondre au hash en DB.
+
+Le matching SCE dans `fetchSCEFresh` utilise `clean(dbCard.name, true)` (le nom de la carte, pas le hash) pour la correspondance avec l'inventaire SCE — il n'est donc pas affecté par le format du hash.
+
+## Migrations
+
+La fonction `initDB()` de `db.js` exécute automatiquement des migrations `ALTER TABLE` au démarrage pour ajouter les colonnes manquantes aux bases existantes. Chaque migration est wrappée dans un `try/catch` (silencieux si la colonne existe déjà).
+
+| Migration | Table | Description |
+|-----------|-------|-------------|
+| `steam_market_price_eur REAL` | cards | Prix marché EUR (résolu) |
+| `steam_market_last_sale_price_eur REAL` | cards | Dernier prix de vente (7j) |
+| `steam_market_sales_7d INTEGER` | cards | Volume de vente 7j |
+| `steam_market_fetched_at INTEGER` | cards | Date du dernier fetch marché |
+| `badge_crafted INTEGER` | games | Statut badge crafté (NULL/0/1) |
+| `badge_crafted_fetched_at INTEGER` | games | Date du dernier check badge |
+| `sce_quick_trade TEXT` | cards | Lien de trade rapide SCE |
+| `steam_market_sell_price_eur REAL` | cards | Prix de vente le plus bas (EUR) |
+| `steam_market_sell_qty INTEGER` | cards | Volume de vente total |
+| `steam_market_buy_order_eur REAL` | cards | Demande d'achat la plus haute (EUR) |
+| `steam_market_buy_order_qty INTEGER` | cards | Nombre de demandes d'achat |
 
 ## Limite 24h des prix marche
 
@@ -272,6 +306,29 @@ La base `data/es_cache.sqlite` contient 5 tables :
 | `badge_appids` | AppIDs decouverts sur la page badges (cache de decouverte) |
 | `market_queue` | File d'attente du worker de marché (appid, hash, priorité, statut, timestamps) |
 
+### Format du hash (`cards.hash`)
+
+Le hash est le `market_hash_name` brut renvoyé par l'API Steam `ajaxgetbadgeinfo`, sans aucun nettoyage. Le suffixe "(Trading Card)" est conservé :
+
+- Exemple : `664320-Loki (Trading Card)`
+- Ce format correspond exactement au `market_hash_name` attendu par les endpoints du Steam Community Market
+- Le matching d'inventaire (`fillInventoryData`) compare le `market_hash_name` brut des items d'inventaire au hash en DB
+- Le matching SCE (`fetchSCEFresh`) utilise `clean(dbCard.name, true)` (le nom, pas le hash) — non affecté
+
+### Préservation des prix marché (`upsertCards`)
+
+La fonction `upsertCards` fait un DELETE + INSERT des cartes à chaque appel. Pour éviter de perdre les prix marché (écrits par `updateCardMarketPrices` en Phase 2), deux mécanismes de préservation sont en place :
+
+1. **`existingPrices` (fallback DB)** : avant le DELETE, les prix marché existants sont lus depuis la DB et stockés dans une map `hash → {price, lastSalePrice, sales, fetchedAt, sellPriceEur, sellQty, buyOrderEur, buyOrderQty}`. Si un champ n'est pas fourni dans l'objet carte, la valeur existante en DB est utilisée.
+
+2. **Passage explicite (défensif)** : `analyzeBadgeStatus` et `fetchSCEFresh` passent explicitement tous les champs de prix marché dans les objets carte lus depuis la DB (`steamMarketPriceEur`, `steamMarketLastSalePriceEur`, `steamMarketSales7d`, `steamMarketFetchedAt`, `steamMarketSellPriceEur`, `steamMarketSellQty`, `steamMarketBuyOrderEur`, `steamMarketBuyOrderQty`). Cela garantit la préservation même si le mécanisme de fallback échoue.
+
+Les colonnes sell/buy order (`steam_market_sell_price_eur`, `steam_market_sell_qty`, `steam_market_buy_order_eur`, `steam_market_buy_order_qty`) sont incluses dans l'INSERT de `upsertCards` et préservées via `existingPrices`. Des migrations `ALTER TABLE` les ajoutent automatiquement aux bases existantes (voir [Migrations](#migrations)).
+
+### Arrondi des prix marché
+
+Les prix marché (`priceEur` et `lastSalePriceEur`) sont arrondis à 2 décimales (format #,##) dans `fetchMarketPricesV2` avant écriture dans le `priceMap` passé à `updateCardMarketPrices`. Le debug log affiche également la valeur arrondie.
+
 ### Logique de prix marché
 
 Pour chaque carte, le worker récupère 4 sources et stocke :
@@ -283,8 +340,8 @@ Pour chaque carte, le worker récupère 4 sources et stocke :
 | `steam_market_buy_order_eur` | listing page / orderbook | Demande d'achat la plus haute (EUR). Priorité à la listing page (EUR direct), fallback orderbook (USD converti) |
 | `steam_market_buy_order_qty` | listing page | Nombre de demandes d'achat (volume total) |
 | `steam_market_sales_7d` | pricehistory | Volume de vente cumulé sur 7 jours |
-| `steam_market_last_sale_price_eur` | pricehistory | Prix de la dernière vente dans les 7 jours (NULL si pas de vente) |
-| `steam_market_price_eur` | résolu | Dernier prix de vente si < 7j, sinon buy order. Peuple initialement par la conversion EUR du prix gamepage SCE (phase 1), puis affine par le marché |
+| `steam_market_last_sale_price_eur` | pricehistory | Prix de la dernière vente dans les 7 jours (NULL si pas de vente). Arrondi à 2 décimales |
+| `steam_market_price_eur` | résolu | Dernier prix de vente si < 7j, sinon buy order. Arrondi à 2 décimales. Peuple initialement par la conversion EUR du prix gamepage SCE (phase 1), puis affine par le marché |
 | `sce_market_price_usd` | gamepage SCE | Prix USD de la carte sur la gamepage SCE (section "Trading Cards") |
 
 Conversions EUR : le buy order de l'orderbook est en USD - le taux effectif est calculé à partir du ratio `prix_vente_EUR / prix_vente_USD` (priceoverview / orderbook), fallback à 0.92. Les prix de la listing page sont en EUR directement (pas de conversion nécessaire). Les prix de la gamepage SCE sont convertis avec le taux BCE (frankfurter.app, cache 24h, surcharge `SCE_USD_TO_EUR`, fallback 0.92).
@@ -375,12 +432,16 @@ L'endpoint `/api/data` retourne un objet JSON plat compatible avec le script Tam
       {
         "name": "Card Name",
         "qty": 1,
-        "hash": "485450-Card Name",
+        "hash": "485450-Card Name (Trading Card)",
         "sce stock": 3,
         "sce worth": 1,
         "sce price": 1,
         "sce marketPriceUSD": 0.05,
-        "sce quick-trade": "https://..."
+        "sce quick-trade": "https://...",
+        "steamMarketPriceEur": 0.06,
+        "steamMarketLastSalePriceEur": 0.06,
+        "steamMarketSales7d": 17,
+        "steamMarketFetchedAt": 1790249510124
       }
     ]
   }
