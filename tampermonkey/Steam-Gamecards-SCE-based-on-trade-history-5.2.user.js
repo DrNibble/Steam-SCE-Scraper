@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam-Gamecards-SCE based on API
 // @namespace    http://tampermonkey.net/
-// @version      0.5
+// @version      0.6
 // @description  Scrap complet Steam & SCE avec cache persistant, workers et API REST
 // @author       DrNibble
 // @match        https://steamcommunity.com/profiles/*/badges*
@@ -1060,48 +1060,92 @@ ES_log("[getPageAppids] Entrée fonction");
      * texte et la carte via le lien /market/listings/753/<appid>-<nom>.
      */
 
-    // Cache en mémoire des prix fallback (market_hash_name -> { price, volume, source } | null)
+    // Cache en mémoire des prix fallback (market_hash_name -> { price, date, volume, source } | null)
     win.ES._priceFallbackCache = win.ES._priceFallbackCache || new Map();
     // Set des market_hash_name en cours de fetch fallback
     win.ES._priceFallbackPending = win.ES._priceFallbackPending || new Set();
 
-    // Fallback : fetch le prix directement depuis l'endpoint Steam priceoverview.
-    // Retourne { sellPriceEur, medianPriceEur, volume } ou null.
-    win.ES.fetchSteamPriceOverview = async function(marketHashName) {
-        const url = `https://steamcommunity.com/market/priceoverview/?appid=753&market_hash_name=${encodeURIComponent(marketHashName)}&currency=3&l=english`;
+    // Parse une date au format Steam pricehistory : "Sep 19 2024 01: +0"
+    // Retourne un timestamp en millisecondes (UTC)
+    win.ES._parseMarketDate = function(dateStr) {
+        if (!dateStr) return 0;
+        const match = dateStr.trim().match(/^(\w{3})\s+(\d+)\s+(\d+)\s+(\d+):?\s*([+-]?\d+)(?::(\d+))?/);
+        if (!match) return 0;
+        const months = {Jan:0, Feb:1, Mar:2, Apr:3, May:4, Jun:5, Jul:6, Aug:7, Sep:8, Oct:9, Nov:10, Dec:11};
+        const m = months[match[1]];
+        if (m === undefined) return 0;
+        const year = parseInt(match[3]);
+        const day = parseInt(match[2]);
+        const hour = parseInt(match[4]);
+        const tzOffsetHours = parseInt(match[5]) || 0;
+        const tzOffsetMin = parseInt(match[6] || '0') || 0;
+        const totalOffsetMin = tzOffsetHours * 60 + (tzOffsetHours >= 0 ? tzOffsetMin : -tzOffsetMin);
+        return Date.UTC(year, m, day, hour) - totalOffsetMin * 60000;
+    };
+
+    // Fallback : fetch l'historique des ventes depuis l'endpoint Steam pricehistory.
+    // Nécessite les cookies Steam (le userscript tourne dans le navigateur connecté).
+    // Retourne { price, date, volume, salesCount, totalVolume, medianPrice } ou null.
+    win.ES.fetchSteamPriceHistory = async function(marketHashName, days = 7) {
+        const url = `https://steamcommunity.com/market/pricehistory/?appid=753&market_hash_name=${encodeURIComponent(marketHashName)}&l=english&currency=3`;
         return new Promise((resolve) => {
             GM.xmlHttpRequest({
                 method: "GET",
                 url: url,
                 timeout: 10000,
+                headers: { 'Accept': 'application/json' },
                 onload: (res) => {
                     if (res.status >= 200 && res.status < 300) {
                         try {
                             const data = JSON.parse(res.responseText);
-                            if (data.success) {
-                                const parsePrice = (str) => {
-                                    if (!str) return null;
-                                    // Steam retourne les prix au format FR: "1,98€" ou EN: "€1.98"
-                                    // On extrait le nombre et on gère les deux formats
-                                    const m = str.match(/[\d.,]+/);
-                                    if (!m) return null;
-                                    let numStr = m[0];
-                                    if (numStr.includes(',') && numStr.includes('.')) {
-                                        // Format mixte: "1,234.56" → on garde le point comme séparateur décimal
-                                        numStr = numStr.replace(/,/g, '');
-                                    } else if (numStr.includes(',')) {
-                                    // Format FR: "1,98" → virgule = séparateur décimal
-                                        numStr = numStr.replace(',', '.');
-                                    }
-                                    return parseFloat(numStr);
-                                };
-                                resolve({
-                                    sellPriceEur: parsePrice(data.lowest_price),
-                                    medianPriceEur: parsePrice(data.median_price),
-                                    volume: parseInt(data.volume) || 0,
-                                });
-                                return;
+                            if (!data.success) { resolve(null); return; }
+
+                            const prices = data.prices || [];
+                            if (prices.length === 0) { resolve(null); return; }
+
+                            // Filtrer les ventes dans les N derniers jours
+                            const cutoff = Date.now() - (days * 24 * 60 * 60 * 1000);
+                            const recentSales = [];
+
+                            for (const entry of prices) {
+                                // Format: ["Sep 19 2024 01: +0", 1.95, 1]  (date, prix EUR, volume)
+                                const dateStr = entry[0];
+                                const price = parseFloat(entry[1]);
+                                const volume = parseInt(entry[2]) || 1;
+                                const ts = win.ES._parseMarketDate(dateStr);
+                                if (ts >= cutoff && ts > 0) {
+                                    recentSales.push({ date: ts, price, volume });
+                                }
                             }
+
+                            if (recentSales.length === 0) { resolve(null); return; }
+
+                            // Dernière vente (la plus récente)
+                            const lastSale = recentSales.reduce((latest, current) =>
+                                current.date > latest.date ? current : latest
+                            );
+
+                            const totalVolume = recentSales.reduce((sum, s) => sum + s.volume, 0);
+
+                            // Prix médian pondéré sur 7 jours
+                            const allPrices = [];
+                            for (const s of recentSales) {
+                                for (let i = 0; i < s.volume; i++) allPrices.push(s.price);
+                            }
+                            allPrices.sort((a, b) => a - b);
+                            const medianPrice = allPrices.length > 0
+                                ? allPrices[Math.floor(allPrices.length / 2)]
+                                : null;
+
+                            resolve({
+                                price: lastSale.price,        // Dernier prix de vente EUR
+                                date: lastSale.date,          // Timestamp ms
+                                volume: lastSale.volume,      // Volume de ce point
+                                salesCount: recentSales.length,
+                                totalVolume,                  // Volume total 7j
+                                medianPrice,                  // Prix médian pondéré 7j EUR
+                            });
+                            return;
                         } catch (e) { /* JSON parse error */ }
                     }
                     resolve(null);
@@ -1131,7 +1175,7 @@ ES_log("[getPageAppids] Entrée fonction");
 
         // Déclencher le fetch
         pending.add(marketHashName);
-        win.ES.fetchSteamPriceOverview(marketHashName).then(result => {
+        win.ES.fetchSteamPriceHistory(marketHashName, 7).then(result => {
             pending.delete(marketHashName);
             cache.set(marketHashName, result); // result peut être null (cache négatif)
             if (onFetchComplete) onFetchComplete();
@@ -1213,9 +1257,11 @@ ES_log("[getPageAppids] Entrée fonction");
                             // Re-render après la complétion du fetch asynchrone
                             win.ES.renderMarketSearchSCE();
                         });
-                        if (fallback && fallback.medianPriceEur != null && fallback.medianPriceEur > 0) {
-                            displayPrice = fallback.medianPriceEur;
-                            priceSource = fallback.volume > 0 ? `prix médian (${fallback.volume} ventes)` : 'prix médian';
+                        if (fallback && fallback.price != null && fallback.price > 0) {
+                            displayPrice = fallback.price;
+                            const saleDate = new Date(fallback.date);
+                            const dateStr = saleDate.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }) + ' ' + saleDate.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+                            priceSource = `dernière vente ${dateStr} (${fallback.totalVolume} ventes 7j)`;
                         }
                     }
 
@@ -1348,9 +1394,11 @@ ES_log("[getPageAppids] Entrée fonction");
                 const fallback = win.ES.getPriceFallback(hash, () => {
                     win.ES.renderMarketListingSCE();
                 });
-                if (fallback && fallback.medianPriceEur != null && fallback.medianPriceEur > 0) {
-                    displayPrice = fallback.medianPriceEur;
-                    priceSource = fallback.volume > 0 ? `prix médian (${fallback.volume} ventes)` : 'prix médian';
+                if (fallback && fallback.price != null && fallback.price > 0) {
+                    displayPrice = fallback.price;
+                    const saleDate = new Date(fallback.date);
+                    const dateStr = saleDate.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }) + ' ' + saleDate.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+                    priceSource = `dernière vente ${dateStr} (${fallback.totalVolume} ventes 7j)`;
                 }
             }
 
