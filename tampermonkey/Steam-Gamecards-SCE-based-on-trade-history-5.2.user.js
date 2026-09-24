@@ -865,7 +865,8 @@ ES_log("[getPageAppids] Entrée fonction");
                         const priceUSD = parseFloat(cardInfo["sce marketPriceUSD"]) || 0;
                         if (priceUSD > 0) {
                             const priceEUR = Math.round(priceUSD * 0.92 * 100) / 100;
-                            marketDiv.innerText = `SCE: ${priceEUR}€`;
+                            const sceWorth = cardInfo["sce worth"] ?? 0;
+                            marketDiv.innerText = `SCE: ${priceEUR}€ (${sceWorth}c)`;
                         } else {
                             marketDiv.innerText = "market N/A";
                         }
