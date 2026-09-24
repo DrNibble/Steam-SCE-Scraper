@@ -1085,13 +1085,57 @@ ES_log("[getPageAppids] Entrée fonction");
                 sp.children.length >= 1 && sp.firstElementChild.tagName === 'SPAN');
             if (!qtySpan) return;
 
+            // Span "À partir de X,XX €" (FR) / "Starting at: $X.XX" (EN)
+            const priceSpan = [...a.querySelectorAll('span')].find(sp =>
+                /^(À partir de|Starting at|From)/i.test(sp.textContent.trim()));
+
+            const stock = card ? (parseInt(card["sce stock"], 10) || 0) : 0;
+            if (!card || stock <= 1) return;
+
+            // --- Modification du prix : dernier prix vendu dans les 7 jours ---
+            if (priceSpan) {
+                const existingPrice = priceSpan.querySelector('.es-sce-price');
+                if (existingPrice && existingPrice.dataset.hash === hash) {
+                    // Déjà traité
+                } else {
+                    if (existingPrice) existingPrice.remove();
+
+                    const sales7d = parseInt(card.steamMarketSales7d) || 0;
+                    const lastSalePriceEur = card.steamMarketLastSalePriceEur != null
+                        ? parseFloat(card.steamMarketLastSalePriceEur)
+                        : null;
+                    const marketPriceEur = card.steamMarketPriceEur != null
+                        ? parseFloat(card.steamMarketPriceEur)
+                        : null;
+
+                    // Prix retenu : dernier prix vendu (priorité lastSale, puis marketPrice si ventes 7j)
+                    let displayPrice = null;
+                    if (lastSalePriceEur != null && lastSalePriceEur > 0) {
+                        displayPrice = lastSalePriceEur;
+                    } else if (sales7d > 0 && marketPriceEur != null && marketPriceEur > 0) {
+                        displayPrice = marketPriceEur;
+                    }
+
+                    if (displayPrice != null) {
+                        const priceText = displayPrice.toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                        const priceEl = document.createElement('span');
+                        priceEl.className = 'es-sce-price';
+                        priceEl.dataset.hash = hash;
+                        priceEl.style.cssText = 'color:#8ed6fb;font-weight:bold;';
+                        priceEl.textContent = `${priceText} €`;
+                        priceEl.title = `Dernier prix vendu (${sales7d > 0 ? sales7d + ' ventes 7j' : 'dernière vente'})`;
+                        // Remplacer le contenu du span de prix par le dernier prix vendu
+                        priceSpan.textContent = '';
+                        priceSpan.appendChild(priceEl);
+                    }
+                }
+            }
+
+            // --- Ajout info SCE (worth + stock) ---
             // Déjà traité pour cette carte : rien à faire (le DOM React peut être recyclé)
             const existing = qtySpan.querySelector('.es-sce-worth');
             if (existing && existing.dataset.hash === hash) return;
             if (existing) existing.remove();
-
-            const stock = card ? (parseInt(card["sce stock"], 10) || 0) : 0;
-            if (!card || stock <= 1) return;
 
             const worth = card["sce worth"] ?? 0;
             const el = document.createElement('span');
