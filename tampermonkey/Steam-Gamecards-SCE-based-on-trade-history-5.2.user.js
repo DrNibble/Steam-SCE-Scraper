@@ -65,7 +65,7 @@
         return new Promise((resolve, reject) => {
             GM.xmlHttpRequest({
                 method: "GET",
-                url: `${API_BASE_URL}${endpoint}`,
+                url: `${API_BASE_URL}:${API_BASE_PORT}${endpoint}`,
                 headers: { 'Accept': 'application/json' },
                 timeout: 10000,
                 onload: (res) => {
