@@ -838,7 +838,7 @@ ES_log("[getPageAppids] Entrée fonction");
                     block.style.position = "relative";
                     block.appendChild(marketDiv);
 
-                    // Données API uniquement (pas de fallback sur fetch listing page)
+                    // Données API en priorité; fallback sur sce marketPriceUSD si API indisponible ou vide
                     const apiInfo = {};
                     if (cardInfo.steamMarketSellQty != null) apiInfo.sellQty = cardInfo.steamMarketSellQty;
                     if (cardInfo.steamMarketSellPriceEur != null) apiInfo.sellPriceEur = cardInfo.steamMarketSellPriceEur;
@@ -850,7 +850,14 @@ ES_log("[getPageAppids] Entrée fonction");
                         const txt = win.ES.formatMarketInfo(apiInfo);
                         marketDiv.innerText = txt || "market N/A";
                     } else {
-                        marketDiv.innerText = "market N/A";
+                        // Fallback: prix marché SCE (USD → EUR * 0.92)
+                        const priceUSD = parseFloat(cardInfo["sce marketPriceUSD"]) || 0;
+                        if (priceUSD > 0) {
+                            const priceEUR = Math.round(priceUSD * 0.92 * 100) / 100;
+                            marketDiv.innerText = `SCE: ${priceEUR}€`;
+                        } else {
+                            marketDiv.innerText = "market N/A";
+                        }
                     }
                 }
             }
