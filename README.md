@@ -13,8 +13,8 @@ steam-sce/
 │       ├── db.js          # Couche SQLite (schema, CRUD)
 │       ├── utils.js       # Utilitaires (HTTP, clean, isSteamEvent, etc.)
 │       ├── steam.js       # Scraping Steam (badges, inventaire, historique trades)
-│       ├── sce.js         # Scraping Steam Card Exchange (prix, stock, credits)
-│       ├── market.js       # Prix marché Steam (orderbook, pricehistory, buy orders)
+│       ├── sce.js         # Scraping Steam Card Exchange (prix, stock, credits, refresh periodique)
+│       ├── market.js       # Prix marché Steam (orderbook, pricehistory, listing page, buy orders)
 │       ├── marketQueue.js # Worker temps réel (token bucket, file prioritaire, stale-while-revalidate)
 │       ├── analyze.js     # Analyse des badges (completion, couts, cartes cheres)
 │       ├── api.js        # Serveur API REST (lecture seule de la DB)
@@ -25,6 +25,8 @@ steam-sce/
 │   ├── db.php             # Connexion SQLite (lecture seule)
 │   ├── index.php          # Page du rapport
 │   └── style.css          # Styles (theme Steam)
+├── tampermonkey/          # Script Tampermonkey (UI Steam + fetch SCE fallback)
+│   └── Steam-Gamecards-SCE-based-on-trade-history-5.2.user.js
 ├── data/                  # Base SQLite (generee automatiquement)
 └── README.md
 ```
@@ -266,24 +268,64 @@ La base `data/es_cache.sqlite` contient 5 tables :
 |-------|-------------|
 | `meta` | Cles-valeurs globales (scecredit, scePendingOffers, sceWaitTime, lasttrade, sceDeferredAppids, usdToEur, usdToEurFetchedAt) |
 | `games` | Un jeu par appid (gamename, disabled, fetched_at, set_cards, badge_crafted, indicateurs de completion) |
-| `cards` | Cartes individuelles par jeu (nom, hash, qty, inventaire, stock SCE, prix gamepage SCE USD, prix marché: vente, buy order, volume 7j) |
+| `cards` | Cartes individuelles par jeu (nom, hash, qty, inventaire, stock SCE, prix gamepage SCE USD, prix marché: vente + volume, buy order + volume, volume 7j, dernière vente 7j) |
 | `badge_appids` | AppIDs decouverts sur la page badges (cache de decouverte) |
 | `market_queue` | File d'attente du worker de marché (appid, hash, priorité, statut, timestamps) |
 
 ### Logique de prix marché
 
-Pour chaque carte, le worker récupère 3 endpoints et stocke :
+Pour chaque carte, le worker récupère 4 sources et stocke :
 
 | Champ | Source | Description |
 |-------|--------|-------------|
-| `steam_market_sell_price_eur` | priceoverview | Prix de vente le plus bas (EUR) |
-| `steam_market_sell_qty` | orderbook | Quantité au prix de vente le plus bas |
-| `steam_market_buy_order_eur` | orderbook | Demande d'achat la plus haute (EUR, convertie depuis USD) |
+| `steam_market_sell_price_eur` | listing page / priceoverview | Prix de vente le plus bas (EUR). Priorité à la listing page (EUR direct), fallback priceoverview |
+| `steam_market_sell_qty` | listing page / orderbook | Volume de vente total (listing page) ou quantité au prix le plus bas (orderbook) |
+| `steam_market_buy_order_eur` | listing page / orderbook | Demande d'achat la plus haute (EUR). Priorité à la listing page (EUR direct), fallback orderbook (USD converti) |
+| `steam_market_buy_order_qty` | listing page | Nombre de demandes d'achat (volume total) |
 | `steam_market_sales_7d` | pricehistory | Volume de vente cumulé sur 7 jours |
-| `steam_market_price_eur` | résolu | Dernier prix de vente si < 7j, sinon buy order. Peuple initialement par la conversion EUR du prix gamepage SCE (phase 1), puis affine par le marche |
+| `steam_market_last_sale_price_eur` | pricehistory | Prix de la dernière vente dans les 7 jours (NULL si pas de vente) |
+| `steam_market_price_eur` | résolu | Dernier prix de vente si < 7j, sinon buy order. Peuple initialement par la conversion EUR du prix gamepage SCE (phase 1), puis affine par le marché |
 | `sce_market_price_usd` | gamepage SCE | Prix USD de la carte sur la gamepage SCE (section "Trading Cards") |
 
-Conversions EUR : le buy order de l'orderbook est en USD - le taux effectif est calcule a partir du ratio `prix_vente_EUR / prix_vente_USD` (priceoverview / orderbook), fallback a 0.92. Les prix de la gamepage SCE sont convertis avec le taux BCE (frankfurter.app, cache 24h, surcharge `SCE_USD_TO_EUR`, fallback 0.92).
+Conversions EUR : le buy order de l'orderbook est en USD - le taux effectif est calculé à partir du ratio `prix_vente_EUR / prix_vente_USD` (priceoverview / orderbook), fallback à 0.92. Les prix de la listing page sont en EUR directement (pas de conversion nécessaire). Les prix de la gamepage SCE sont convertis avec le taux BCE (frankfurter.app, cache 24h, surcharge `SCE_USD_TO_EUR`, fallback 0.92).
+
+#### Page listing Steam (`getListingPageInfo`)
+
+La page listing (`https://steamcommunity.com/market/listings/753/<hash>`) est parsée pour extraire les volumes et prix en EUR directement, sans conversion USD → EUR :
+
+- **Ventes** : volume total (ex: "10 à vendre à partir de €0,97") → `steam_market_sell_qty` = 10, `steam_market_sell_price_eur` = 0.97
+- **Achats** : volume total (ex: "7 demandes d'achat à €0,09 ou moins") → `steam_market_buy_order_qty` = 7, `steam_market_buy_order_eur` = 0.09
+
+Les valeurs de la listing page remplacent celles de l'orderbook (USD → EUR) quand elles sont disponibles, car plus précises (prix EUR natifs). Le parsing utilise regex sur le texte débarrassé des tags HTML (les classes CSS Steam sont dynamiques). Gère le français et l'anglais.
+
+## Script Tampermonkey
+
+Le script Tampermonkey (`tampermonkey/Steam-Gamecards-SCE-based-on-trade-history-5.2.user.js`) s'exécute sur les pages Steam (badges, gamecards, inventaire). Il affiche les statuts SCE (complétables, cartes de valeur, quick-trade) directement dans l'UI Steam.
+
+### Mode API (prioritaire)
+Quand le backend Node.js est disponible (`http://127.0.0.1:3001`), le script récupère les données depuis l'API REST. C'est le mode par défaut — les données sont fraîches et complètes.
+
+### Mode fallback SCE (fetch direct)
+Quand l'API est indisponible, le script bascule en mode fetch SCE direct :
+
+- **Page `/gamecards/:appid`** : fetch SCE en arrière-plan (gamepage + inventaire), analyse des indicateurs de completion, affichage des quick-trade buttons. Bouton "Rafraîchir SCE" pour un refresh manuel.
+- **Page `/badges`** : affichage du cache local, récupération des infos globales SCE (crédit, file d'attente, wait time).
+- **Détection de login** : si la session SCE est expirée ("Please login"), un warning est affiché en console. L'utilisateur doit être connecté à steamcardexchange.net dans le même navigateur.
+
+### Fonctions portées du backend
+- `fetchSCEGlobalInfo()` — crédit, offres en attente, wait time (page profile SCE)
+- `fetchSCEInventory(appid)` — stock, worth, price, quick-trade links (page inventory SCE)
+- `fetchSCEGamePage(appid)` — prix USD + détection trade-in disabled (gamepage SCE)
+- `fetchSCEFresh(appid)` — combine tout, fusion non-destructive (préserve le cache si SCE ne retourne pas une carte)
+- `analyzeBadgeStatus(appid)` — calcule isCompletableViaSCE, hasExpensiveCard, etc. Priorise `steamMarketPriceEur` sur le prix SCE converti. Non-destructif : ne modifie que les champs calculés.
+
+Utilise `DOMParser` (natif navigateur) au lieu de Cheerio, et `GM.xmlHttpRequest` pour les requêtes cross-origin (cookies navigateur automatiques).
+
+## Rafraîchissement périodique SCE
+
+Le module `sce.js` lance automatiquement un intervalle de 10 minutes qui rafraîchit les infos globales SCE (crédit, pending offers, wait time) via `_fetchSCEGlobalInfoInner()`, **uniquement si `waitTime < 1 minute`** (bot non saturé). Si le bot est saturé (`waitTime >= 1`), le refresh est ignoré pour ne pas surcharger la file d'attente.
+
+L'intervalle est démarré après le premier appel réussi à `fetchSCEGlobalInfo()` et est idempotent (un seul timer actif). Le verrou `_globalInfoPromise` empêche les appels concurrents.
 
 ## Serveur API REST
 
