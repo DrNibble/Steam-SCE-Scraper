@@ -322,7 +322,6 @@ $profileLink = STEAM_PROFILE_PATH;
                             <?php if (($cardRow['steam_market_last_sale_price_eur'] ?? null) !== null && ($cardRow['steam_market_last_sale_price_eur'] ?? '') !== ''): ?>
                                 <br><small>Dernière vente 7j : <?= fmtEur($cardRow['steam_market_last_sale_price_eur']) ?></small>
                             <?php endif; ?>
-                            <br><small>Vente < 7j</small>
                             <?php if (!$marketFresh): ?>
                                 <br><small style="color:#ff9d00;">données obsolètes</small>
                             <?php endif; ?>
