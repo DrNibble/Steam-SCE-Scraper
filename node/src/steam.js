@@ -21,7 +21,7 @@ function parseBadgePage(html) {
     // Debug: detecter si on est sur une page de login
     const titleMatch = html.match(/<title>(.*?)<\/title>/i);
     const pageTitle = titleMatch ? titleMatch[1] : '(inconnu)';
-    ES_log(`[parseBadgePage] Titre de la page: ${pageTitle}`);
+    //ES_log(`[parseBadgePage] Titre de la page: ${pageTitle}`);
 
     if (html.includes('login') && html.includes('steamLogin')) {
         console.error('[parseBadgePage] Page de login detectee - les cookies Steam sont invalides.');
@@ -29,7 +29,7 @@ function parseBadgePage(html) {
 
     // Debug: verifier la presence de badge_row
     const badgeCount = (html.match(/badge_row/g) || []).length;
-    ES_log(`[parseBadgePage] ${badgeCount} elements badge_row trouves dans le HTML.`);
+    //ES_log(`[parseBadgePage] ${badgeCount} elements badge_row trouves dans le HTML.`);
 
     const $ = cheerio.load(html);
 
@@ -176,7 +176,7 @@ export async function getAllPagesAppids(profileLink = null, options = {}) {
     // Page 1: detecte la pagination
     const firstHtml = await fetchPage(1);
     const maxPage = detectMaxBadgePage(firstHtml);
-    ES_log(`[getAllPagesAppids] ${maxPage} page(s) de badges detectee(s).`);
+    //ES_log(`[getAllPagesAppids] ${maxPage} page(s) de badges detectee(s).`);
 
     let html = firstHtml;
     for (let page = 1; page <= maxPage; page++) {
@@ -211,7 +211,7 @@ let inventoryFetchPromise = null;
 
 /** Invalide le cache inventaire (nouveau trade ou purge manuelle). */
 export function invalidateInventoryCache() {
-    ES_log('[fetchInventory] Cache inventaire invalide.');
+    //ES_log('[fetchInventory] Cache inventaire invalide.');
     inventoryCache = null;
 }
 
@@ -242,7 +242,7 @@ async function _fetchInventory(pl) {
     let nextStart = 0;
     let hasMore = true;
 
-    ES_log('[fetchInventory] Debut de la recuperation complete...');
+    //ES_log('[fetchInventory] Debut de la recuperation complete...');
 
     while (hasMore) {
         const url = `https://steamcommunity.com/${pl}/inventory/json/753/6/?start=${nextStart}`;
@@ -288,7 +288,7 @@ export async function fillInventoryData(cards, profileLink = null) {
 
         const { rgInventory, rgDescriptions } = invData;
 
-        ES_log('[fillInventoryData] Utilisation du cache inventaire...');
+        //ES_log('[fillInventoryData] Utilisation du cache inventaire...');
 
         for (const itemId of Object.keys(rgInventory)) {
             const item = rgInventory[itemId];
@@ -316,7 +316,7 @@ export async function fillInventoryData(cards, profileLink = null) {
         cards.forEach(c => { c.qty = c.inv.length; });
 
         const ownedCount = cards.reduce((acc, c) => acc + c.inv.length, 0);
-        ES_log(`[fillInventoryData] Termine. ${ownedCount} cartes identifiees.`);
+        //ES_log(`[fillInventoryData] Termine. ${ownedCount} cartes identifiees.`);
 
         return cards;
     } catch (error) {
@@ -365,13 +365,13 @@ export async function fetchBadgeCrafted(appid, profileLink = null, options = {})
     const crafted = existing?.badge_crafted ?? null;
     if (!force) {
         if (crafted === 1 && !refetchCrafted) {
-            ES_log(`[fetchBadgeCrafted] ${appid}: badge crafte (cache DB), pas de re-check.`);
+           // ES_log(`[fetchBadgeCrafted] ${appid}: badge crafte (cache DB), pas de re-check.`);
             return true;
         }
         const checkedAt = Number(existing?.badge_crafted_fetched_at ?? 0);
         if (crafted === 0 && checkedAt > 0
             && Date.now() - checkedAt < STEAM_CACHE_TTL.BADGE_CRAFTED_FALSE_MS) {
-            ES_log(`[fetchBadgeCrafted] ${appid}: badge non crafte verifie recemment, pas de re-check.`);
+            //ES_log(`[fetchBadgeCrafted] ${appid}: badge non crafte verifie recemment, pas de re-check.`);
             return false;
         }
     }
@@ -396,7 +396,7 @@ export async function fetchBadgeCrafted(appid, profileLink = null, options = {})
         if (result !== null) setGameBadgeCrafted(appid, result);
         return result;
     } catch (e) {
-        ES_log(`[fetchBadgeCrafted] Erreur pour ${appid}: ${e.message}`);
+        //ES_log(`[fetchBadgeCrafted] Erreur pour ${appid}: ${e.message}`);
         return null;
     }
 }
@@ -467,7 +467,7 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
     }
 
     const url = `https://steamcommunity.com/${pl}/ajaxgetbadgeinfo/${appid}`;
-    ES_log(`[fetchSteamData] entree fonction ${appid}`);
+   // ES_log(`[fetchSteamData] entree fonction ${appid}`);
 
     try {
         const text = await httpGet(url, { cookies: steamCookie(), retries, accept: 'application/json', extraHeaders: STEAM_AJAX_HEADERS });
@@ -597,7 +597,7 @@ export async function syncSteamInventoryHistory(profileLink = null) {
                 break;
             }
 
-            ES_log(`[syncSteamInventoryHistory] ${rows.length} trades sur la page ${pageCount + 1}.`);
+           // ES_log(`[syncSteamInventoryHistory] ${rows.length} trades sur la page ${pageCount + 1}.`);
 
             let shouldStop = false;
             let newTradeCount = 0;
@@ -672,7 +672,7 @@ export async function syncSteamInventoryHistory(profileLink = null) {
                     const ts = parseSteamDateToMs(latestDate);
                     if (ts > 0) {
                         setMeta('lasttrade', String(ts));
-                        ES_log(`[syncSteamInventoryHistory] Curseur lasttrade mis a jour: ${ts} (${new Date(ts).toLocaleString()})`);
+                       // ES_log(`[syncSteamInventoryHistory] Curseur lasttrade mis a jour: ${ts} (${new Date(ts).toLocaleString()})`);
                     }
                 }
             }
@@ -764,7 +764,7 @@ export async function syncSteamMarketHistory(profileLink = null) {
                 break;
             }
 
-            ES_log(`[syncSteamMarketHistory] ${events.length} evenement(s) sur la page ${page + 1}.`);
+            //ES_log(`[syncSteamMarketHistory] ${events.length} evenement(s) sur la page ${page + 1}.`);
 
             // Trier par time_event decroissant pour traiter les plus recentes en premier
             const sortedEvents = [...events].sort((a, b) => b.time_event - a.time_event);
@@ -866,7 +866,7 @@ export async function syncSteamMarketHistory(profileLink = null) {
                 const latestTs = sortedEvents[0].time_event * 1000 + Math.floor((sortedEvents[0].time_event_fraction || 0) / 1e6);
                 if (latestTs > 0) {
                     setMeta('lastmarkettrade', String(latestTs));
-                    ES_log(`[syncSteamMarketHistory] Curseur lastmarkettrade mis a jour: ${latestTs} (${new Date(latestTs).toLocaleString()})`);
+                   // ES_log(`[syncSteamMarketHistory] Curseur lastmarkettrade mis a jour: ${latestTs} (${new Date(latestTs).toLocaleString()})`);
                 }
             }
 
