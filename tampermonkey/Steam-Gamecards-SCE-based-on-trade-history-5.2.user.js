@@ -35,13 +35,14 @@
     // --- CONFIG API REST ---
     // Le serveur API tourne sur le backend Node.js (npm run api ou integre au daemon npm run sync)
     // Modifiez API_BASE_URL si votre serveur tourne sur un autre hote/port
-    const API_BASE_URL = 'http://127.0.0.1:3001';
+    const API_BASE_URL = 'http://127.0.0.1';
+    const API_BASE_PORT = '3001'
 
     // Initialisation de la structure de données
     win.ES = win.ES || {};
     win.ES.DATA = { scecredit: 0 };
     win.ES.CONCURRENCY_LIMIT = 4;
-    win.ES.API_BASE_URL = API_BASE_URL;
+    win.ES.API_BASE_URL = API_BASE_URL + ':' + API_BASE_PORT;
 
     // --- UTILS ---
     win.ES.http = async function(url) {
