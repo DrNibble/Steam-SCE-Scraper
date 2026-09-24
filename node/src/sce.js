@@ -8,6 +8,41 @@ let _sceCookieStr = getMeta('sceCookie', '') || SCE_COOKIE || '';
 let creditFetched = false;
 let _sceRetryDone = false;
 let _globalInfoPromise = null;
+let _globalInfoInterval = null;
+const GLOBAL_INFO_REFRESH_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Demarre un intervalle qui rafraichit les infos globales SCE (credit,
+ * pending offers, wait time) toutes les 10 minutes, uniquement si le
+ * waitTime actuel est inferieur a 1 minute (bot non sature).
+ * Idempotent: ne cree pas un second intervalle si deja actif.
+ */
+function _startGlobalInfoInterval() {
+    if (_globalInfoInterval) return;
+
+    _globalInfoInterval = setInterval(async () => {
+        const waitTime = parseFloat(getMeta('sceWaitTime', '0')) || 0;
+        if (waitTime >= 1) {
+            ES_log(`[fetchSCEGlobalInfo] Skip refresh: waitTime=${waitTime} min (>= 1 min).`);
+            return;
+        }
+
+        // Evite les appels concurrents
+        if (_globalInfoPromise) return;
+
+        ES_log('[fetchSCEGlobalInfo] Refresh periodique (waitTime < 1 min)...');
+        creditFetched = false; // Force le re-fetch
+        _globalInfoPromise = (async () => {
+            try {
+                await _fetchSCEGlobalInfoInner();
+            } finally {
+                _globalInfoPromise = null;
+            }
+        })();
+    }, GLOBAL_INFO_REFRESH_MS);
+
+    ES_log(`[fetchSCEGlobalInfo] Intervalle de rafraichissement demarre (toutes les ${GLOBAL_INFO_REFRESH_MS / 60000} min).`);
+}
 
 /**
  * Retourne le cookie SCE courant.
@@ -60,6 +95,8 @@ export async function fetchSCEGlobalInfo() {
     _globalInfoPromise = (async () => {
         try {
             await _fetchSCEGlobalInfoInner();
+            // Demarre le rafraichissement periodique (toutes les 10 min) si pas deja actif
+            _startGlobalInfoInterval();
         } finally {
             _globalInfoPromise = null;
         }
