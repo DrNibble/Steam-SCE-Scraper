@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam-Gamecards-SCE based on API
 // @namespace    http://tampermonkey.net/
-// @version      0.6
+// @version      0.7
 // @description  Scrap complet Steam & SCE avec cache persistant, workers et API REST
 // @author       DrNibble
 // @match        https://steamcommunity.com/profiles/*/badges*
@@ -12,6 +12,7 @@
 // @match        https://steamcommunity.com/my/inventory*
 // @match        https://steamcommunity.com/market/search*
 // @match        https://steamcommunity.com/market/listings/753/*
+// @match        https://steamcommunity.com/tradeoffer/new/*partner=83905207*
 
 // @grant        GM.xmlHttpRequest
 // @grant        GM.setValue
@@ -1747,7 +1748,148 @@ ES_log("[getPageAppids] Entrée fonction");
             }, 6000);
         }
     }
-    // Lancement automatique
-    mainWorkflow();
+
+    // ──────────────────────────────────────────────────────────────
+    //  SCE AUTO-DEPOSIT BOT
+    //  Trade offers vers le bot SCE (partner=83905207)
+    //  Lit les asset IDs depuis les paramètres URL (you=ID1;ID2;...&them=...)
+    //  Ajoute automatiquement les cartes au trade et envoie.
+    // ──────────────────────────────────────────────────────────────
+    win.ES._sceBot = {
+        SCE_PARTNER_ID: '83905207',
+        AUTO_SEND: true,
+        MESSAGE: 'SteamTrade Matcher',
+        DO_AFTER_TRADE: 'NOTHING',
+        ORDER: 'AS_IS',
+    };
+
+    win.ES._sceBotRestoreCookie = function(oldCookie) {
+        if (oldCookie) {
+            var now = new Date();
+            var time = now.getTime();
+            time += 15 * 24 * 60 * 60 * 1000;
+            now.setTime(time);
+            document.cookie = 'strTradeLastInventoryContext=' + oldCookie + '; expires=' + now.toUTCString() + '; path=/tradeoffer/';
+        }
+    };
+
+    win.ES._sceBotAddCards = function(g_s, g_v, directAssetIds) {
+        if (!directAssetIds || directAssetIds.length === 0) return;
+
+        var inv, myItems;
+
+        // Accès à l'inventaire de l'utilisateur (Vous)
+        inv = g_v.Users[0].rgContexts[753][6].inventory;
+
+        // Force Steam à générer les éléments HTML des items
+        inv.BuildInventoryDisplayElements();
+        myItems = inv.rgInventory;
+
+        var addedCount = 0;
+        directAssetIds.forEach(function(id) {
+            const item = myItems[id];
+            if (item && item.element) {
+                // IMPORTANT : On s'assure que l'élément est bien passé à la fonction globale de Steam
+                win.MoveItemToTrade(item.element);
+                addedCount++;
+            } else {
+                console.warn("[SCE Bot] Item non trouvé ou élément HTML manquant pour ID:", id);
+            }
+        });
+
+        ES_log(`[SCE Bot] ${addedCount} items ajoutés au trade.`);
+
+        if (addedCount > 0 && g_s.AUTO_SEND) {
+            // Un délai un peu plus long pour laisser l'interface visuelle se mettre à jour
+            setTimeout(function() {
+                if (typeof win.ToggleReady === 'function') {
+                    win.ToggleReady(true);
+
+                    setTimeout(function() {
+                        if (win.CTradeOfferStateManager) {
+                            win.CTradeOfferStateManager.ConfirmTradeOffer();
+                        }
+                    }, 1000);
+                }
+            }, 2000);
+        }
+    };
+
+    win.ES._sceBotCheckContexts = function(g_s, g_v) {
+        if (!g_v || !g_v.Users || !g_v.Users[0]) return;
+
+        var ready = 0;
+        var errorDetected = false;
+
+        g_v.Users.forEach(function (user) {
+            if (user && user.rgContexts && user.rgContexts['753'] && user.rgContexts['753']['6']) {
+                if (user.inventory) {
+                    ready += 1;
+                }
+                else if (user.rgContexts['753']['6'].inventory) {
+                    ready += 1;
+                }
+                else if (user.cLoadsInFlight === 0) {
+                    if (user.bLoadFailed) {
+                        console.error("[SCE Bot] Steam a bloqué le chargement (429 ou erreur réseau).");
+                        errorDetected = true;
+                        return;
+                    }
+
+                    console.log("[SCE Bot] Inventaire manquant, tentative de chargement...");
+                    user.loadInventory(753, 6);
+                }
+            }
+        });
+
+        if (errorDetected) {
+            console.warn("[SCE Bot] Arrêt automatique : Veuillez attendre 2-5 minutes avant de rafraîchir.");
+            return;
+        }
+
+        if (ready === 2) {
+            console.log("[SCE Bot] Inventaires prêts. Sélection de l'onglet...");
+            setTimeout(function() {
+                win.TradePageSelectInventory(g_v.Users[0], 753, "6");
+
+                const urlParams = new URLSearchParams(window.location.search);
+                const youParam = urlParams.get('you');
+                let directAssetIds = youParam ? youParam.split(';') : null;
+
+                win.ES._sceBotAddCards(g_s, g_v, directAssetIds);
+            }, 2000);
+        } else {
+            window.setTimeout(win.ES._sceBotCheckContexts, 5000, g_s, g_v);
+        }
+    };
+
+    win.ES.runSceAutoDepositBot = function() {
+        const urlParams = new URLSearchParams(window.location.search);
+
+        var Cards = [
+            (urlParams.get('you') ? urlParams.get('you').split(';') : []),
+            (urlParams.get('them') ? urlParams.get('them').split(';') : [])
+        ];
+
+        // Nettoyage cookie Steam
+        var oldCookie = document.cookie.split('strTradeLastInventoryContext=')[1];
+        if (oldCookie) { oldCookie = oldCookie.split(';')[0]; }
+        document.cookie = 'strTradeLastInventoryContext=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/tradeoffer/';
+
+        var Users = [win.UserYou, win.UserThem];
+        var global_vars = {"Users": Users, "oldCookie": oldCookie, "Cards": Cards};
+
+        ES_log("[SCE Bot] Démarrage — Auto-Deposit vers le bot SCE.");
+        window.setTimeout(win.ES._sceBotCheckContexts, 500, win.ES._sceBot, global_vars);
+    };
+
+    // Lancement : SCE Auto-Deposit Bot sur les trade offers vers le bot SCE
+    if (window.location.href.includes('tradeoffer/new') && window.location.search.includes('partner=83905207')) {
+        win.ES.runSceAutoDepositBot();
+        // Ne pas lancer mainWorkflow sur les pages de trade offer
+    } else {
+        // Lancement automatique (badges, market, etc.)
+        mainWorkflow();
+    }
 
 })();
