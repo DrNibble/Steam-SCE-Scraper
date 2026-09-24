@@ -536,10 +536,15 @@ export async function syncSteamInventoryHistory(profileLink = null) {
     const pl = profileLink || profilePath();
     let startTime = null;
     const originalStopTimestamp = parseInt(getMeta('lasttrade', '0'), 10) || 0;
-    let stopTimestamp = originalStopTimestamp;
+    // Overlap de 10 min : Steam peut mettre du temps a afficher un trade dans
+    // l historique. Sans overlap, un trade accepte a T mais visible seulement a
+    // T+5min serait saute si le curseur a deja avance. On re-traite les 10
+    // dernieres minutes pour rattraper les trades retardes.
+    const OVERLAP_MS = 10 * 60 * 1000;
+    let stopTimestamp = Math.max(0, originalStopTimestamp - OVERLAP_MS);
     const updatedAppIds = new Set(); // Appids dont lasttrade a ete modifie
 
-    ES_log(`[syncSteamInventoryHistory] Point d arret: ${stopTimestamp} (${new Date(stopTimestamp).toLocaleString()})`);
+    ES_log(`[syncSteamInventoryHistory] Point d arret: ${originalStopTimestamp} (${new Date(originalStopTimestamp).toLocaleString()}) + overlap 10 min → ${stopTimestamp} (${new Date(stopTimestamp).toLocaleString()})`);
 
     let pageCount = 0;
     const MAX_PAGES = 50; // Securite anti-ban
@@ -706,10 +711,13 @@ export async function syncSteamInventoryHistory(profileLink = null) {
  * mais avec un curseur separe (lastmarkettrade) pour eviter les conflits.
  */
 export async function syncSteamMarketHistory(profileLink = null) {
-    const stopTimestamp = parseInt(getMeta('lastmarkettrade', '0'), 10) || 0;
+    const originalStopTimestamp = parseInt(getMeta('lastmarkettrade', '0'), 10) || 0;
+    // Overlap de 10 min : meme rationale que syncSteamInventoryHistory
+    const OVERLAP_MS = 10 * 60 * 1000;
+    const stopTimestamp = Math.max(0, originalStopTimestamp - OVERLAP_MS);
     const updatedAppIds = new Set();
 
-    ES_log(`[syncSteamMarketHistory] Point d arret: ${stopTimestamp} (${new Date(stopTimestamp).toLocaleString()})`);
+    ES_log(`[syncSteamMarketHistory] Point d arret: ${originalStopTimestamp} (${new Date(originalStopTimestamp).toLocaleString()}) + overlap 10 min → ${stopTimestamp} (${new Date(stopTimestamp).toLocaleString()})`);
 
     let start = 0;
     const COUNT = 500; // Taille de page maximale
