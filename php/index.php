@@ -288,7 +288,7 @@ $profileLink = STEAM_PROFILE_PATH;
         <?php else: ?>
         <table>
             <thead>
-                <tr><th>Jeu</th><th>Carte</th><th>Dernière vente</th><th>Échange</th></tr>
+                <tr><th>Jeu</th><th>Carte</th><th>Dernière vente</th><th>Complétable</th></tr>
             </thead>
             <tbody>
                 <?php foreach ($expensiveList as $g):
