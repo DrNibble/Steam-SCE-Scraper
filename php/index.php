@@ -288,7 +288,7 @@ $profileLink = STEAM_PROFILE_PATH;
         <?php else: ?>
         <table>
             <thead>
-                <tr><th>Jeu</th><th>Carte</th><th>Dernière vente</th></tr>
+                <tr><th>Jeu</th><th>Carte</th><th>Dernière vente</th><th>Échange</th></tr>
             </thead>
             <tbody>
                 <?php foreach ($expensiveList as $g):
@@ -329,6 +329,13 @@ $profileLink = STEAM_PROFILE_PATH;
                             <span class="stale">Pas de vente < 7j</span>
                         <?php else: ?>
                             <span class="stale">Vente < 7j non confirmee</span>
+                        <?php endif; ?>
+                    </td>
+                    <td>
+                        <?php if (!empty($g['is_completable_via_trade'])): ?>
+                            <span style="color:#a3d200; font-weight:bold;">✔ Prêt</span>
+                        <?php else: ?>
+                            <span style="color:#8f98a0;">—</span>
                         <?php endif; ?>
                     </td>
                 </tr>
