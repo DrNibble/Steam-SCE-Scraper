@@ -94,7 +94,7 @@ CREATE TABLE IF NOT EXISTS cards (
     sce_worth                 INTEGER DEFAULT 0,
     sce_price                 INTEGER DEFAULT 0,
     sce_market_price_usd      REAL DEFAULT 0,
-    steam_market_price_eur     REAL,
+    steam_market_price_eur    REAL,
     steam_market_last_sale_price_eur REAL,
     steam_market_sales_7d      INTEGER DEFAULT 0,
     steam_market_fetched_at    INTEGER,
@@ -102,6 +102,7 @@ CREATE TABLE IF NOT EXISTS cards (
     steam_market_sell_qty      INTEGER,
     steam_market_buy_order_eur REAL,
     steam_market_buy_order_qty INTEGER,
+    sce_quick_trade            TEXT,             -- lien de trade rapide SCE (href du bouton btn-primary)
     UNIQUE(appid, hash),
     FOREIGN KEY(appid) REFERENCES games(appid) ON DELETE CASCADE
 );
@@ -127,6 +128,8 @@ export function initDB() {
         'ALTER TABLE games ADD COLUMN badge_crafted INTEGER',
         // Date du dernier check badge_crafted (cache anti rate-limit steam.js)
         'ALTER TABLE games ADD COLUMN badge_crafted_fetched_at INTEGER',
+        // Lien de trade rapide SCE (href du bouton btn-primary sur la page inventory)
+        'ALTER TABLE cards ADD COLUMN sce_quick_trade TEXT',
     ];
     for (const sql of migrations) {
         try { db.exec(sql); } catch { /* colonne deja presente */ }
