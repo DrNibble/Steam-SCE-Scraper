@@ -78,13 +78,13 @@ export async function getPriceOverview(marketHashName) {
         });
 
         if (text.trim().startsWith('<')) {
-            ES_log(`[getPriceOverview] HTML reçu pour ${marketHashName}`);
+           // ES_log(`[getPriceOverview] HTML reçu pour ${marketHashName}`);
             return null;
         }
 
         const data = JSON.parse(text);
         if (!data.success) {
-            ES_log(`[getPriceOverview] success=false pour ${marketHashName}`);
+           // ES_log(`[getPriceOverview] success=false pour ${marketHashName}`);
             return null;
         }
 
@@ -145,7 +145,7 @@ export async function getOrderbook(marketHashName) {
 
         // Vérifier qu'on a du JSON
         if (text.trim().startsWith('<')) {
-            ES_log(`[getOrderbook] HTML reçu au lieu de JSON pour ${marketHashName}`);
+           // ES_log(`[getOrderbook] HTML reçu au lieu de JSON pour ${marketHashName}`);
             return null;
         }
 
@@ -156,7 +156,7 @@ export async function getOrderbook(marketHashName) {
         // 2. { data: { success: true, data: {...} } }
         const payload = (outer.success !== undefined) ? outer : outer.data;
         if (!payload || payload.success !== true) {
-            ES_log(`[getOrderbook] success=false pour ${marketHashName}`);
+           // ES_log(`[getOrderbook] success=false pour ${marketHashName}`);
             return null;
         }
 
@@ -318,14 +318,14 @@ export async function getRecentSale(marketHashName, days = 7) {
 
         // Vérifier qu'on a du JSON (Steam renvoie du HTML si cookies invalides)
         if (text.trim().startsWith('<')) {
-            ES_log(`[getRecentSale] HTML reçu (cookies invalides?) pour ${marketHashName}`);
+            //ES_log(`[getRecentSale] HTML reçu (cookies invalides?) pour ${marketHashName}`);
             return null;
         }
 
         const data = JSON.parse(text);
 
         if (!data.success) {
-            ES_log(`[getRecentSale] success=false pour ${marketHashName}`);
+           // ES_log(`[getRecentSale] success=false pour ${marketHashName}`);
             return null;
         }
 
@@ -458,7 +458,7 @@ export async function resolveCardPrice(card, days = 7) {
         } else if (ssrSale.ecurrency === 3) {
             recentSale = ssrSale;
         } else {
-            ES_log(`[resolveCardPrice] pricehistory SSR devise=${ssrSale.ecurrency} (3=EUR attendu) pour ${marketHashName} : prix ignorés, fallback endpoint`);
+            //ES_log(`[resolveCardPrice] pricehistory SSR devise=${ssrSale.ecurrency} (3=EUR attendu) pour ${marketHashName} : prix ignorés, fallback endpoint`);
             ssrVolumeOnly = ssrSale.totalVolume || 0;
             needHistoryEndpoint = true;
         }
@@ -603,7 +603,7 @@ export async function fetchMarketPricesV2(appid, delayMs = 500) {
             continue;
         }
 
-        ES_log(`[fetchMarketPricesV2] Carte: ${card.name || card.hash}`);
+       // ES_log(`[fetchMarketPricesV2] Carte: ${card.name || card.hash}`);
 
         try {
             const result = await resolveCardPrice(card, 7);
