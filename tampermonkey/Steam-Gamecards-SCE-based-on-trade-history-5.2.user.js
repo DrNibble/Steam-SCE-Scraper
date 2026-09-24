@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam-Gamecards-SCE based on API
 // @namespace    http://tampermonkey.net/
-// @version      0.3
+// @version      0.4
 // @description  Scrap complet Steam & SCE avec cache persistant, workers et API REST
 // @author       DrNibble
 // @match        https://steamcommunity.com/profiles/*/badges*
@@ -20,6 +20,7 @@
 // @connect      steamcardexchange.net
 // @connect      localhost
 // @connect      127.0.0.1
+// @connect      steamcommunity.com
 // ==/UserScript==
 
 
@@ -1057,6 +1058,82 @@ ES_log("[getPageAppids] Entrée fonction");
      * Les classes CSS Steam sont générées (instables) : on repère le span par son
      * texte et la carte via le lien /market/listings/753/<appid>-<nom>.
      */
+
+    // Cache en mémoire des prix fallback (market_hash_name -> { price, volume, source } | null)
+    win.ES._priceFallbackCache = win.ES._priceFallbackCache || new Map();
+    // Set des market_hash_name en cours de fetch fallback
+    win.ES._priceFallbackPending = win.ES._priceFallbackPending || new Set();
+
+    // Fallback : fetch le prix directement depuis l'endpoint Steam priceoverview.
+    // Retourne { sellPriceEur, medianPriceEur, volume } ou null.
+    win.ES.fetchSteamPriceOverview = async function(marketHashName) {
+        const url = `https://steamcommunity.com/market/priceoverview/?appid=753&market_hash_name=${encodeURIComponent(marketHashName)}&currency=3&l=english`;
+        return new Promise((resolve) => {
+            GM.xmlHttpRequest({
+                method: "GET",
+                url: url,
+                timeout: 10000,
+                onload: (res) => {
+                    if (res.status >= 200 && res.status < 300) {
+                        try {
+                            const data = JSON.parse(res.responseText);
+                            if (data.success) {
+                                const parsePrice = (str) => {
+                                    if (!str) return null;
+                                    // "1,98€" ou "€1.98" → 1.98
+                                    const m = str.match(/[\d.,]+/);
+                                    if (!m) return null;
+                                    return parseFloat(m[0].replace(/\./g, '').replace(',', '.'));
+                                };
+                                resolve({
+                                    sellPriceEur: parsePrice(data.lowest_price),
+                                    medianPriceEur: parsePrice(data.median_price),
+                                    volume: parseInt(data.volume) || 0,
+                                });
+                                return;
+                            }
+                        } catch (e) { /* JSON parse error */ }
+                    }
+                    resolve(null);
+                },
+                onerror: () => resolve(null),
+                ontimeout: () => resolve(null),
+            });
+        });
+    };
+
+    // Récupère le prix fallback depuis le cache, ou déclenche un fetch asynchrone.
+    // Retourne immédiatement la valeur cachée (ou null si pas encore disponible).
+    // Si un fetch est déclenché, il appellera onFetchComplete() quand terminé.
+    win.ES.getPriceFallback = function(marketHashName, onFetchComplete) {
+        const cache = win.ES._priceFallbackCache;
+        const pending = win.ES._priceFallbackPending;
+
+        // Déjà en cache
+        if (cache.has(marketHashName)) {
+            return cache.get(marketHashName);
+        }
+
+        // Fetch déjà en cours
+        if (pending.has(marketHashName)) {
+            return null;
+        }
+
+        // Déclencher le fetch
+        pending.add(marketHashName);
+        win.ES.fetchSteamPriceOverview(marketHashName).then(result => {
+            pending.delete(marketHashName);
+            cache.set(marketHashName, result); // result peut être null (cache négatif)
+            if (onFetchComplete) onFetchComplete();
+        }).catch(() => {
+            pending.delete(marketHashName);
+            cache.set(marketHashName, null);
+            if (onFetchComplete) onFetchComplete();
+        });
+
+        return null;
+    };
+
     win.ES.renderMarketSearchSCE = function() {
         // Index des cartes : "appid|nom normalisé" -> carte
         const index = new Map();
@@ -1110,10 +1187,26 @@ ES_log("[getPageAppids] Entrée fonction");
 
                     // Prix retenu : dernier prix vendu (priorité lastSale, puis marketPrice si ventes 7j)
                     let displayPrice = null;
+                    let priceSource = '';
                     if (lastSalePriceEur != null && lastSalePriceEur > 0) {
                         displayPrice = lastSalePriceEur;
+                        priceSource = sales7d > 0 ? `${sales7d} ventes 7j` : 'dernière vente';
                     } else if (sales7d > 0 && marketPriceEur != null && marketPriceEur > 0) {
                         displayPrice = marketPriceEur;
+                        priceSource = `${sales7d} ventes 7j`;
+                    }
+
+                    // FALLBACK : si aucune donnée de prix dans l'API, fetch via Steam priceoverview
+                    if (displayPrice == null) {
+                        const marketHashName = `${appid}-${name}`;
+                        const fallback = win.ES.getPriceFallback(marketHashName, () => {
+                            // Re-render après la complétion du fetch asynchrone
+                            win.ES.renderMarketSearchSCE();
+                        });
+                        if (fallback && fallback.medianPriceEur != null && fallback.medianPriceEur > 0) {
+                            displayPrice = fallback.medianPriceEur;
+                            priceSource = fallback.volume > 0 ? `prix médian (${fallback.volume} ventes)` : 'prix médian';
+                        }
                     }
 
                     if (displayPrice != null) {
@@ -1123,7 +1216,7 @@ ES_log("[getPageAppids] Entrée fonction");
                         priceEl.dataset.hash = hash;
                         priceEl.style.cssText = 'color:#8ed6fb;font-weight:bold;';
                         priceEl.textContent = `${priceText} €`;
-                        priceEl.title = `Dernier prix vendu (${sales7d > 0 ? sales7d + ' ventes 7j' : 'dernière vente'})`;
+                        priceEl.title = `Dernier prix vendu (${priceSource})`;
                         // Remplacer le contenu du span de prix par le dernier prix vendu
                         priceSpan.textContent = '';
                         priceSpan.appendChild(priceEl);
