@@ -47,6 +47,11 @@ foreach ($allGames as $g) {
     }
 }
 usort($expensiveList, function($a, $b) {
+    // isCompletableViaTrade en fin de liste
+    $ta = !empty($a['is_completable_via_trade']) ? 1 : 0;
+    $tb = !empty($b['is_completable_via_trade']) ? 1 : 0;
+    if ($ta !== $tb) return $ta <=> $tb;
+    // Puis par prix décroissant
     $pa = (float)($a['_expensive']['_card']['steam_market_price_eur'] ?? 0);
     $pb = (float)($b['_expensive']['_card']['steam_market_price_eur'] ?? 0);
     return $pb <=> $pa;
