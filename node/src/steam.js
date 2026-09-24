@@ -429,8 +429,40 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
             && Date.now() - existingGame.fetched_at < STEAM_CACHE_TTL.STEAM_DATA_MS
             && (getCards(appid) || []).length > 0) {
             ES_log(`[fetchSteamData] ${appid}: donnees Steam fraiches (< ${STEAM_CACHE_TTL.STEAM_DATA_MS / 60000} min), reutilisees sans requete.`);
+
+            // Le cache porte sur les donnees du set (noms, hashes, icons) qui sont
+            // stables, mais l inventaire peut avoir change (cartes vendues sur le
+            // marche, echangees). On rafraichit l inventaire meme sur cache-hit pour
+            // que inv_json et totalOwnedQty restent a jour. fetchInventory a son
+            // propre cache (5 min) donc aucune requete HTTP superflue la plupart du temps.
+            const dbCards = getCards(appid);
+            const cards = dbCards.map(c => ({
+                name: c.name,
+                qty: c.qty,
+                index: c.card_index,
+                inv: JSON.parse(c.inv_json || '[]'),
+                hash: c.hash,
+                iconUrl: c.icon_url,
+                artUrl: c.art_url,
+                'sce stock': c.sce_stock,
+                'sce worth': c.sce_worth,
+                'sce price': c.sce_price,
+                'sce marketPriceUSD': c.sce_market_price_usd,
+                'sce quick-trade': c.sce_quick_trade,
+                steamMarketPriceEur: c.steam_market_price_eur,
+                steamMarketLastSalePriceEur: c.steam_market_last_sale_price_eur,
+                steamMarketSales7d: c.steam_market_sales_7d,
+                steamMarketFetchedAt: c.steam_market_fetched_at,
+                steamMarketSellPriceEur: c.steam_market_sell_price_eur,
+                steamMarketSellQty: c.steam_market_sell_qty,
+                steamMarketBuyOrderEur: c.steam_market_buy_order_eur,
+                steamMarketBuyOrderQty: c.steam_market_buy_order_qty,
+            }));
+            await fillInventoryData(cards, pl);
+            upsertCards(appid, cards);
+
             await fetchBadgeCrafted(appid, null, { force, refetchCrafted });
-            return { ...existingGame, cards: getCards(appid) };
+            return { ...existingGame, cards };
         }
     }
 
