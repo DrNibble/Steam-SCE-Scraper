@@ -8,13 +8,13 @@ import { fetchMarketPricesV2, fetchSingleCardPrice } from './market.js';
 import { startMarketWorker, enqueueGameCards, enqueueStaleCards, getQueueStats, PRIORITY } from './marketQueue.js';
 import { startApiServer } from './api.js';
 
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const MS_PER_DAY = 24 * 60 * 60 * 1000; // 1 jour
 // Intervalle du mode surveillance : scan de l historique des trades (tradehistory)
 const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 // Intervalle du scan complet des badges (toutes les pages, phases 1 + 2)
 // lance par le daemon `npm run sync` en mode surveillance
-const FULL_BADGE_SCAN_INTERVAL_MS = 1 * 24 * 60 * 60 * 1000; // 1 jour
+const FULL_BADGE_SCAN_INTERVAL_MS = 1 * MS_PER_DAY;
 
 // Scan SCE: fetchSCEInventory s'execute en 4 taches paralleles si le waitTime
 // SCE (minutes) est < 1, sinon de facon sequentielle
