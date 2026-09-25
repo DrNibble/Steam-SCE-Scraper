@@ -14,7 +14,7 @@ const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 // Intervalle du scan complet des badges (toutes les pages, phases 1 + 2)
 // lance par le daemon `npm run sync` en mode surveillance
-const FULL_BADGE_SCAN_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+const FULL_BADGE_SCAN_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 
 // Scan SCE: fetchSCEInventory s'execute en 4 taches paralleles si le waitTime
 // SCE (minutes) est < 1, sinon de facon sequentielle
