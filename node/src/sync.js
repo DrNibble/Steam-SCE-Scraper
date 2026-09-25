@@ -276,8 +276,14 @@ async function startParallelTasks(profileLink) {
 
     // --- Task 2: fetchMarketPricesV2 sur appids avec totalOwnedQty > 0, toutes les heures ---
     // Respecte le rate-limit en place (delai 500ms entre cartes, garde-fou 24h
-    // via isMarketPriceFresh dans fetchMarketPricesV2). Enfile aussi les cartes
-    // stale pour le worker de fond (stale-while-revalidate).
+    // via isMarketPriceFresh dans fetchMarketPricesV2).
+    // IMPORTANT: ne PAS appeler enqueueStaleCards() ici. Task 2 fait deja le
+    // refresh des prix directement via fetchMarketPricesV2. Si on enfile aussi
+    // les cartes stale au background worker, les deux sources font des requetes
+    // Steam Market en simultane, depassent le rate limit (~120 req/min) et
+    // causent des 429 qui ralentissent les deux. Le background worker reste
+    // disponible pour les refresh on-demand (front PHP) et les trades
+    // (enqueueGameCards depuis Task 3).
     async function task2_MarketRefresh() {
         while (true) {
             try {
@@ -293,13 +299,6 @@ async function startParallelTasks(profileLink) {
                     } catch (e) {
                         console.error(`[Task2-Market] Erreur sur ${appid}:`, e.message);
                     }
-                }
-                // Enfiler les cartes stale pour le worker de fond
-                enqueueStaleCards();
-                // Stats du worker
-                const stats = getQueueStats();
-                if (stats.total > 0) {
-                    console.log(`[Worker] Queue: ${stats.pending} en attente, ${stats.done} traitees, ${stats.error} erreurs`);
                 }
             } catch (e) {
                 console.error('[Task2-Market] Erreur:', e.message);
