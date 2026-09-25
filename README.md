@@ -78,10 +78,8 @@ npm run sync
 
 Ce mode :
 1. Si la BD est vide : lance le scan complet (badges toutes pages + cartes + SCE, voir [Synchronisation en 2 phases](#synchronisation-des-badges-2-phases))
-2. Si la BD est remplie : passe directement en mode surveillance (un scan complet part dès le premier cycle)
-3. En mode surveillance :
-   - `syncSteamInventoryHistory` + `syncSteamMarketHistory` toutes les **5 minutes** (les badges differes par le bot SCE sont retentes a chaque cycle, avec re-scan cible des jeux touches par des trades ou transactions marche)
-   - scan complet des badges (toutes les pages, phases 1 + 2, comme `npm run sync:badges`) toutes les **15 minutes** - le re-scan cible est skippe sur ces cycles car le scan complet couvre deja ces appids. Lors de ce scan, l'option `refetchCrafted` est activee : les badges deja craftes (`badge_crafted = 1`) sont re-verifies systematiquement (voir [Caches anti rate-limit](#caches-anti-rate-limit-steam))
+2. Si la BD est remplie : passe directement en mode surveillance
+3. En mode surveillance : lance **4 taches paralleles** (voir [Taches paralleles du daemon](#taches-paralleles-du-daemon))
 
 ### Scanner un appid specifique
 
@@ -309,14 +307,20 @@ Parcourt la base et enfile toutes les cartes dont le prix date de plus de 24 heu
 npm run -- --market stats
 ```
 
-### Intégration avec le mode daemon
+### Taches paralleles du daemon
 
-Le mode `npm run sync` démarre automatiquement le worker de marché en arrière-plan. Dans la boucle de surveillance :
-1. `syncSteamInventoryHistory` + `syncSteamMarketHistory` detectent les trades et transactions de marche toutes les 5 min. Les appids des deux sources sont fusionnes pour le re-scan cible
-2. Les jeux avec trades/transactions sont re-scannes (`processQueue` avec delai reduit a 500ms) hors cycles de scan complet
-3. Un scan complet des badges (toutes les pages, 2 phases) tourne toutes les 15 min
-4. Les cartes stale (> 24h) sont enfilees pour le worker de fond
-5. Le worker refresh les prix en continu avec le token bucket, dans la limite d'un fetch par 24h et par carte
+Le mode `npm run sync` démarre automatiquement le worker de marché en arrière-plan, le serveur API, puis lance **4 tâches parallèles** après le sync initial (DB remplie et stabilisée) :
+
+| Tâche | Fréquence | Action |
+|-------|-----------|--------|
+| **Task 1 — SCE credit/waittime** | 2 min | `resetCreditFlag()` + `fetchSCEGlobalInfo()` : rafraîchit le crédit, les offres en attente et le wait time SCE. La restriction waittime existante (`isSCEBusy` dans `fetchSCEFresh`) est respectée par les autres tâches |
+| **Task 2 — Prix marché** | 1 heure | `fetchMarketPricesV2` sur les appids en DB où `total_owned_qty > 0` + `analyzeBadgeStatus`. Respecte le rate-limit (délai 500ms, garde-fou 24h via `isMarketPriceFresh`). Enfile aussi les cartes stale pour le worker de fond |
+| **Task 3 — Trade history** | 5 min | `syncSteamInventoryHistory` → `syncSteamMarketHistory` → si des trades sont détectés, `fetchSteamData` (force) sur les appids affectés. Signale ces appids à la Task 4 via une variable partagée |
+| **Task 4 — Scan SCE** | 15 min ou immédiat | `fetchSCEFresh` sur les appids en DB. Scan complet toutes les 15 min, ou **immédiat** sur les appids signalés par la Task 3 (nouveaux trades). Parallelisation : 4 tâches si `waitTime < 1 min`, sinon séquentiel. `analyzeBadgeStatus` après chaque appid |
+
+**Communication Task 3 → Task 4** : la variable partagée `tradeUpdatedAppIds` permet à la Task 3 de signaler les appids affectés par des trades. La Task 4 les consomme et lance `fetchSCEFresh` immédiatement dessus, sans attendre le prochain cycle de 15 min.
+
+Le worker de marché continue de tourner en arrière-plan avec son token bucket adaptatif, dans la limite d'un fetch par carte et par 24h. La Task 2 enfile les cartes stale (> 24h) pour ce worker.
 
 ### Lancer le front-end PHP
 
@@ -519,15 +523,20 @@ Le serveur est bind sur `127.0.0.1` par defaut : les donnees ne sont pas exposee
 
 1. Le scraper Node.js recupere les donnees Steam (badges toutes pages, inventaire, historique trades + marche) et SCE (prix, stock, prix gamepage USD)
 2. Les donnees sont stockees dans SQLite (phase 1 : inventaire SCE, phase 2 : prix marche)
-3. Le worker de marche recupere les prix (token bucket, file prioritaire, au plus 1 fetch par carte et par 24h)
-4. Le serveur API expose les donnees en lecture seule pour le script Tampermonkey
-5. Le front-end PHP lit SQLite et genere le rapport HTML (cartes cheres, completables, depot)
+3. Apres le sync initial, **4 tâches parallèles** tournent en continu (voir [Tâches parallèles du daemon](#tâches-parallèles-du-daemon)) :
+   - Task 1 : refresh SCE credit/waittime (2 min)
+   - Task 2 : prix marché sur appids avec `totalOwnedQty > 0` (1 h)
+   - Task 3 : trade history + re-scan Steam si trades (5 min)
+   - Task 4 : scan SCE complet ou ciblé (15 min ou immédiat)
+4. Le worker de marche recupere les prix en arriere-plan (token bucket, file prioritaire, au plus 1 fetch par carte et par 24h)
+5. Le serveur API expose les donnees en lecture seule pour le script Tampermonkey
+6. Le front-end PHP lit SQLite et genere le rapport HTML (cartes cheres, completables, depot)
 
 ## Commandes disponibles
 
 | Commande | Description |
 |----------|-------------|
-| `npm run sync` | Mode daemon (tradehistory + marché 5 min, scan complet 15 min, worker marché) |
+| `npm run sync` | Mode daemon : scan complet si BD vide, puis 4 tâches parallèles (SCE credit 2 min, prix marché 1 h, trade history 5 min, scan SCE 15 min) |
 | `npm run login` | Authentification Steam (mot de passe ou QR code) |
 | `npm run login:qr` | Authentification Steam via QR code |
 | `npm run login:password` | Authentification Steam via mot de passe |
