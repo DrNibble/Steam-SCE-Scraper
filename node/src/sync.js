@@ -2,7 +2,7 @@ import { sleep, isSteamEvent, ES_log, getSteamProfilePath, setSteamCookie, getSt
 import { getPageAppids, getAllPagesAppids, fetchSteamData, syncSteamInventoryHistory, syncSteamMarketHistory, invalidateBadgePagesCache, invalidateInventoryCache } from './steam.js';
 import { fetchSCEFresh, fetchSCEGlobalInfo, isSCEBusy, resetCreditFlag } from './sce.js';
 import { analyzeBadgeStatus } from './analyze.js';
-import { getAllBadgeAppids, getIncompleteBadgeAppids, getGame, purgeCache, getMeta, setMeta, isDBEmpty, countGames } from './db.js';
+import { getAllBadgeAppids, getIncompleteBadgeAppids, getGame, purgeCache, getMeta, setMeta, isDBEmpty, countGames, getAllGames } from './db.js';
 import { getSteamCookies } from './auth.js';
 import { fetchMarketPricesV2, fetchSingleCardPrice } from './market.js';
 import { startMarketWorker, enqueueGameCards, enqueueStaleCards, getQueueStats, PRIORITY } from './marketQueue.js';
@@ -20,6 +20,12 @@ const FULL_BADGE_SCAN_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 // SCE (minutes) est < 1, sinon de facon sequentielle
 const SCE_PARALLEL_TASKS = 4;
 const SCE_PARALLEL_WAITTIME_MAX = 1;
+
+// Intervalles des 4 taches paralleles (mode surveillance post-sync initial)
+const SCE_CREDIT_REFRESH_MS = 2 * 60 * 1000;       // Task 1: credit/waittime SCE
+const MARKET_REFRESH_INTERVAL_MS = 60 * 60 * 1000;  // Task 2: prix marche (1h)
+const TRADE_HISTORY_POLL_MS = 5 * 60 * 1000;        // Task 3: trade history (5 min)
+const SCE_SCAN_INTERVAL_MS = 15 * 60 * 1000;        // Task 4: scan SCE complet (15 min)
 
 /**
  * Traite une liste d'appids (fetchSteamData + fetchSCEFresh par appid).
@@ -227,17 +233,210 @@ export async function syncBadgesWorkflow(profileLink = null, options = {}) {
 }
 
 /**
+ * Lance 4 taches paralleles apres le sync initial (DB remplie et stabilisee).
+ *
+ * Les 4 taches tournent en parallele via Promise.all (boucles infinies):
+ *   1) Refresh SCE credit/waittime (fetchSCEGlobalInfo) toutes les 2 min
+ *   2) fetchMarketPricesV2 sur appids avec totalOwnedQty > 0, toutes les heures
+ *   3) syncSteamInventoryHistory + syncSteamMarketHistory + fetchSteamData
+ *      sur appids affectes si trades detectes, toutes les 5 min
+ *   4) fetchSCEFresh sur appids en DB, toutes les 15 min ou immediatement
+ *      si la tache 3 a detecte des entrees (nouveaux trades)
+ *
+ * Communication tache 3 -> tache 4: variable partagee tradeUpdatedAppIds.
+ * La tache 3 y ajoute les appids affectes par des trades; la tache 4 les
+ * consomme et lance fetchSCEFresh immediatement dessus.
+ *
+ * @param {string} profileLink - Profile path Steam
+ */
+async function startParallelTasks(profileLink) {
+    const pl = profileLink || getSteamProfilePath();
+
+    // Variable partagee: appids affectes par des trades (tache 3 -> tache 4)
+    let tradeUpdatedAppIds = [];
+
+    // --- Task 1: Refresh SCE credit/waittime, toutes les 2 min ---
+    // Recupere le credit, pending offers et wait time SCE. resetCreditFlag()
+    // force le re-fetch (sinon le flag creditFetched reste true et les valeurs
+    // du cycle precedent sont reutilisees). La restriction waittime existante
+    // (isSCEBusy dans fetchSCEFresh) est respectee par les autres taches.
+    async function task1_SCERefresh() {
+        while (true) {
+            try {
+                resetCreditFlag();
+                await fetchSCEGlobalInfo();
+                const waitTime = getSCEWaitTime();
+                ES_log(`[Task1-SCE] Credit/waittime refresh: waitTime=${waitTime} min.`);
+            } catch (e) {
+                console.error('[Task1-SCE] Erreur:', e.message);
+            }
+            await sleep(SCE_CREDIT_REFRESH_MS);
+        }
+    }
+
+    // --- Task 2: fetchMarketPricesV2 sur appids avec totalOwnedQty > 0, toutes les heures ---
+    // Respecte le rate-limit en place (delai 500ms entre cartes, garde-fou 24h
+    // via isMarketPriceFresh dans fetchMarketPricesV2). Enfile aussi les cartes
+    // stale pour le worker de fond (stale-while-revalidate).
+    async function task2_MarketRefresh() {
+        while (true) {
+            try {
+                const games = getAllGames();
+                const appids = games
+                    .filter(g => g.total_owned_qty > 0 && !g.disabled)
+                    .map(g => g.appid);
+                ES_log(`[Task2-Market] Refresh prix marche pour ${appids.length} jeu(x) (totalOwnedQty > 0).`);
+                for (const appid of appids) {
+                    try {
+                        await fetchMarketPricesV2(appid, 500);
+                        analyzeBadgeStatus(appid);
+                    } catch (e) {
+                        console.error(`[Task2-Market] Erreur sur ${appid}:`, e.message);
+                    }
+                }
+                // Enfiler les cartes stale pour le worker de fond
+                enqueueStaleCards();
+                // Stats du worker
+                const stats = getQueueStats();
+                if (stats.total > 0) {
+                    console.log(`[Worker] Queue: ${stats.pending} en attente, ${stats.done} traitees, ${stats.error} erreurs`);
+                }
+            } catch (e) {
+                console.error('[Task2-Market] Erreur:', e.message);
+            }
+            await sleep(MARKET_REFRESH_INTERVAL_MS);
+        }
+    }
+
+    // --- Task 3: Trade history sync + fetchSteamData si trades, toutes les 5 min ---
+    // syncSteamInventoryHistory -> syncSteamMarketHistory -> si des trades sont
+    // detectes (entrees retournees), fetchSteamData sur les appids affectes
+    // (force: bypass du cache TTL Steam car un trade vient d etre detecte).
+    // Signale a la tache 4 de lancer fetchSCEFresh immediatement sur ces appids.
+    async function task3_TradeHistory() {
+        while (true) {
+            try {
+                const tradeUpdated = await syncSteamInventoryHistory(pl);
+                const marketUpdated = await syncSteamMarketHistory(pl);
+                const updatedAppIds = [...new Set([...(tradeUpdated || []), ...(marketUpdated || [])])];
+
+                if (updatedAppIds.length > 0) {
+                    ES_log(`[Task3-Trade] ${updatedAppIds.length} jeu(x) affecte(s) par des trades. Re-scan Steam...`);
+                    for (const appid of updatedAppIds) {
+                        if (!isSteamEvent(appid)) {
+                            try {
+                                // force: bypass du cache TTL Steam (trade detecte)
+                                await fetchSteamData(appid, pl, { force: true });
+                            } catch (e) {
+                                console.error(`[Task3-Trade] Erreur fetchSteamData sur ${appid}:`, e.message);
+                            }
+                        }
+                    }
+                    // Signaler a la tache 4 de lancer fetchSCEFresh immediatement
+                    tradeUpdatedAppIds = [...new Set([...tradeUpdatedAppIds, ...updatedAppIds])];
+                }
+            } catch (e) {
+                console.error('[Task3-Trade] Erreur:', e.message);
+            }
+            await sleep(TRADE_HISTORY_POLL_MS);
+        }
+    }
+
+    // --- Task 4: fetchSCEFresh sur appids en DB, toutes les 15 min ou immediatement si tache 3 a des entrees ---
+    // Si tradeUpdatedAppIds n est pas vide (tache 3 a detecte des trades),
+    // lance fetchSCEFresh immediatement sur ces appids. Sinon, attend le
+    // scan complet (toutes les 15 min) sur TOUS les appids en DB.
+    // fetchSCEFresh respecte la restriction waittime existante (isSCEBusy).
+    // Parallelisation: 4 taches si waitTime < 1 min, sinon sequentiel.
+    async function task4_SCEScan() {
+        let lastFullScanAt = Date.now(); // Evite un scan immediat apres le sync initial
+
+        while (true) {
+            const now = Date.now();
+            const hasTradeEntries = tradeUpdatedAppIds.length > 0;
+            const fullScanDue = now - lastFullScanAt >= SCE_SCAN_INTERVAL_MS;
+
+            if (hasTradeEntries || fullScanDue) {
+                try {
+                    let appidsToScan;
+                    if (hasTradeEntries) {
+                        // Scan immediat sur les appids affectes par des trades
+                        appidsToScan = [...tradeUpdatedAppIds];
+                        tradeUpdatedAppIds = [];
+                        ES_log(`[Task4-SCE] Scan immediat pour ${appidsToScan.length} appid(s) (trades detectes par tache 3).`);
+                    } else {
+                        // Scan complet: tous les appids en DB non desactives
+                        const games = getAllGames();
+                        appidsToScan = games.filter(g => !g.disabled).map(g => g.appid);
+                        ES_log(`[Task4-SCE] Scan complet SCE pour ${appidsToScan.length} appids.`);
+                        lastFullScanAt = now;
+                    }
+
+                    // Recupere le waitTime SCE pour la parallelisation
+                    const waitTime = getSCEWaitTime();
+                    const parallel = (waitTime < SCE_PARALLEL_WAITTIME_MAX) ? SCE_PARALLEL_TASKS : 1;
+                    ES_log(`[Task4-SCE] waitTime SCE: ${waitTime} min -> ${parallel} tache(s) parallele(s).`);
+
+                    let index = 0;
+                    async function worker() {
+                        while (true) {
+                            const i = index++;
+                            if (i >= appidsToScan.length) return;
+                            const appid = appidsToScan[i];
+                            try {
+                                if (isSteamEvent(appid)) continue;
+                                await fetchSCEFresh(appid);
+                                analyzeBadgeStatus(appid);
+                                await sleep(500); // Anti rate-limit entre appids
+                            } catch (e) {
+                                console.error(`[Task4-SCE] Erreur sur ${appid}:`, e.message);
+                            }
+                        }
+                    }
+                    await Promise.all(Array.from({ length: parallel }, () => worker()));
+                } catch (e) {
+                    console.error('[Task4-SCE] Erreur:', e.message);
+                }
+            }
+
+            // Si on vient de traiter des trades, petit delai avant de rechecker;
+            // sinon attendre 1 min avant de rechecker si le scan complet est du
+            if (hasTradeEntries) {
+                await sleep(1000);
+            } else {
+                await sleep(60 * 1000);
+            }
+        }
+    }
+
+    // Lancer les 4 taches en parallele
+    console.log('\n=== Demarrage des 4 taches paralleles ===');
+    console.log('  Task 1: Refresh SCE credit/waittime (toutes les 2 min)');
+    console.log('  Task 2: fetchMarketPricesV2 sur appids avec totalOwnedQty > 0 (toutes les heures)');
+    console.log('  Task 3: Trade history sync + fetchSteamData si trades (toutes les 5 min)');
+    console.log('  Task 4: fetchSCEFresh sur appids en DB (toutes les 15 min ou immediatement si trades)');
+    console.log('');
+
+    await Promise.all([
+        task1_SCERefresh(),
+        task2_MarketRefresh(),
+        task3_TradeHistory(),
+        task4_SCEScan(),
+    ]);
+}
+
+/**
  * Workflow principal - mode daemon
  *
  * - Si la BD est vide : lance le scan complet (processQueue) pour remplir
  *   toutes les donnees (badges, cartes, SCE)
- * - Sinon, boucle de surveillance :
- *   - toutes les 5 min (POLL_INTERVAL_MS) : scan tradehistory
- *     (syncSteamInventoryHistory) + re-scan cible des jeux touches
- *   - toutes les 15 min (FULL_BADGE_SCAN_INTERVAL_MS) : scan complet
- *     des badges (toutes les pages, phases 1 + 2, comme sync:badges)
- *   - phase 2 (fetchMarketPricesV2) : prix marché re-fetchés uniquement
- *     si le dernier fetch de la carte date de plus de 24h
+ * - Sinon, lance les 4 taches paralleles (startParallelTasks):
+ *   1) Refresh SCE credit/waittime (toutes les 2 min)
+ *   2) fetchMarketPricesV2 sur appids avec totalOwnedQty > 0 (toutes les heures)
+ *   3) syncSteamInventoryHistory + syncSteamMarketHistory + fetchSteamData
+ *      si trades detectes (toutes les 5 min)
+ *   4) fetchSCEFresh sur appids en DB (toutes les 15 min ou immediatement
+ *      si la tache 3 a des entrees)
  *
  * @param {string} profileLink
  */
@@ -345,70 +544,16 @@ export async function mainWorkflow(profileLink = null) {
         console.log(`Base deja remplie (${countGames()} jeux). Passage en mode surveillance.`);
     }
 
-    // --- CAS 2: BOUCLE DE SURVEILLANCE ---
-    // - toutes les 5 min (POLL_INTERVAL_MS) : scan tradehistory + re-scan ciblé
-    // - toutes les 15 min (FULL_BADGE_SCAN_INTERVAL_MS) : scan complet des badges
-    //   (toutes les pages, phases 1 + 2, comme syncBadgesWorkflow)
-    console.log(`\n=== Mode surveillance (tradehistory toutes les ${POLL_INTERVAL_MS / 60000} min, scan complet toutes les ${FULL_BADGE_SCAN_INTERVAL_MS / 60000} min) ===\n`);
-
-    let cycle = 0;
-    while (true) {
-        cycle++;
-        const now = new Date().toLocaleTimeString();
-        console.log(`\n--- Cycle ${cycle} [${now}] ---`);
-
-        try {
-            const tradeUpdated = await syncSteamInventoryHistory(pl);
-            const marketUpdated = await syncSteamMarketHistory(pl);
-            const updatedAppIds = [...new Set([...(tradeUpdated || []), ...(marketUpdated || [])])];
-
-            // Badges differes au cycle precedent (file SCE saturee:
-            // waitTime > 1 min et pendingOffers > 10): nouvel essai
-            const deferredAppIds = getDeferredSCEAppids();
-            if (deferredAppIds.length > 0) {
-                console.log(`[Workflow] ${deferredAppIds.length} badge(s) differe(s) au cycle precedent (file SCE saturee). Nouvel essai...`);
-            }
-
-            // Scan complet des badges toutes les 15 minutes : il couvre
-            // (via processQueue sur TOUS les appids) le re-scan des jeux
-            // touches par des trades, on skip donc le re-scan cible sur
-            // ces cycles-la.
-            const fullScanDue = Date.now() - lastFullBadgeScanAt >= FULL_BADGE_SCAN_INTERVAL_MS;
-            if (fullScanDue) {
-                console.log(`[Workflow] Scan complet des badges (toutes les ${FULL_BADGE_SCAN_INTERVAL_MS / 60000} min)...`);
-                await syncBadgesWorkflow(pl, { refetchCrafted: true });
-                lastFullBadgeScanAt = Date.now();
-                console.log(`[Workflow] Scan complet termine.`);
-            } else {
-                // Si des trades nouveaux ont ete detectes (ou des badges differes),
-                // re-scan des jeux concernes (délai réduit à 500ms)
-                const appIdsToRescan = [...new Set([...(updatedAppIds || []), ...deferredAppIds])];
-                if (appIdsToRescan.length > 0) {
-                    console.log(`[Workflow] ${appIdsToRescan.length} jeu(x) a re-scanner. Re-scan force...`);
-                    // forceSteam: un trade vient d etre detecte, on bypass le
-                    // cache TTL de fetchSteamData pour ces appids
-                    await processQueue(appIdsToRescan, pl, { forceSteam: true });
-                    console.log(`[Workflow] Re-scan termine pour ${appIdsToRescan.length} jeu(x).`);
-                }
-            }
-            
-            // Enfiler les cartes stale pour le worker de fond (stale-while-revalidate)
-            enqueueStaleCards();
-            
-            // Stats du worker
-            const stats = getQueueStats();
-            if (stats.total > 0) {
-                console.log(`[Worker] Queue: ${stats.pending} en attente, ${stats.done} traitées, ${stats.error} erreurs`);
-            }
-            
-            console.log(`Cycle ${cycle} termine.`);
-        } catch (e) {
-            console.error(`Erreur lors du cycle ${cycle}:`, e.message);
-        }
-
-        console.log(`Prochaine synchronisation dans ${POLL_INTERVAL_MS / 1000 / 60} minutes...`);
-        await sleep(POLL_INTERVAL_MS);
-    }
+    // --- CAS 2: 4 TACHES PARALLELES ---
+    // Apres le sync initial (DB remplie et stabilisee), 4 taches independantes
+    // tournent en parallele via startParallelTasks:
+    //   1) Refresh SCE credit/waittime (toutes les 2 min)
+    //   2) fetchMarketPricesV2 sur appids avec totalOwnedQty > 0 (toutes les heures)
+    //   3) syncSteamInventoryHistory + syncSteamMarketHistory + fetchSteamData
+    //      si trades detectes (toutes les 5 min)
+    //   4) fetchSCEFresh sur appids en DB (toutes les 15 min ou immediatement
+    //      si la tache 3 a des entrees)
+    await startParallelTasks(pl);
 }
 
 /**
