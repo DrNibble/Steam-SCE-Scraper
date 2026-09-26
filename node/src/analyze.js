@@ -1,5 +1,5 @@
 import { getGame, getCards, upsertGame, upsertCards, getMeta } from './db.js';
-import { isSteamEvent, ES_log } from './utils.js';
+import { isSteamEvent, ES_log, addOwner } from './utils.js';
 
 /**
  * Analyse les donnees Steam et SCE pour determiner l etat de completion d un badge.
@@ -24,6 +24,7 @@ export function analyzeBadgeStatus(appid) {
         index: c.card_index,
         inv: JSON.parse(c.inv_json || '[]'),
         hash: c.hash,
+        owner: c.owner || '',
         'sce stock': c.sce_stock,
         'sce worth': c.sce_worth,
         'sce price': c.sce_price,

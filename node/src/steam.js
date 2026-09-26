@@ -1,6 +1,6 @@
 import * as cheerio from 'cheerio';
 import { httpGet, httpGetJSON, clean, isSteamEvent, sleep, parseSteamDateToMs, getSteamCookie, getSteamProfilePath, extractSessionIdFromCookies, INVENTORY_PAGE_DELAY, ES_log } from './utils.js';
-import { upsertBadgeAppid, upsertGame, upsertCards, getMeta, setMeta, getGame, getBadgeAppid, getCards, updateCardMarketPrices, setGameBadgeCrafted } from './db.js';
+import { upsertBadgeAppid, upsertGame, upsertCards, getMeta, setMeta, getGame, getBadgeAppid, getCards, updateCardMarketPrices, setGameBadgeCrafted, addOwnerToGame, addOwnerToCard } from './db.js';
 
 // Cookie Steam dynamique (recupere via auth.js ou .env)
 function steamCookie() { return getSteamCookie(); }
@@ -15,9 +15,10 @@ const STEAM_AJAX_HEADERS = {
 /**
  * Parse le HTML d'une page de badges et enregistre les appids en DB.
  * @param {string} html - HTML d'une page /badges (une seule page)
+ * @param {string} profileLink - profile link utilise pour le scan (pour le tagging owner)
  * @returns {Array} Tableau d'objets {appid, gamename}
  */
-function parseBadgePage(html) {
+function parseBadgePage(html, profileLink = null) {
     // Debug: detecter si on est sur une page de login
     const titleMatch = html.match(/<title>(.*?)<\/title>/i);
     const pageTitle = titleMatch ? titleMatch[1] : '(inconnu)';
@@ -53,6 +54,11 @@ function parseBadgePage(html) {
 
             // Enregistre dans badge_appids
             upsertBadgeAppid(appId, gameName, isEvent);
+
+            // Tag owner: ce profil possede ce badge (appid)
+            if (profileLink) {
+                addOwnerToGame(appId, profileLink);
+            }
 
             if (!isEvent) {
                 results.push({ appid: appId, gamename: gameName });
@@ -135,7 +141,7 @@ export async function getPageAppids(profileLink = null, page = 1) {
     const pl = profileLink || profilePath();
     const url = `https://steamcommunity.com/${pl}/badges?p=${page}`;
     const html = await httpGet(url, { cookies: steamCookie(), extraHeaders: { 'Referer': 'https://steamcommunity.com/' } });
-    return parseBadgePage(html);
+    return parseBadgePage(html, pl);
 }
 
 /**
@@ -185,7 +191,7 @@ export async function getAllPagesAppids(profileLink = null, options = {}) {
             await sleep(500); // Anti-rate-limit entre les pages
         }
 
-        const results = parseBadgePage(html);
+        const results = parseBadgePage(html, pl);
         let newCount = 0;
         for (const item of results) {
             if (!seen.has(item.appid)) {
@@ -280,8 +286,14 @@ async function _fetchInventory(pl) {
 export async function fillInventoryData(cards, profileLink = null) {
     const pl = profileLink || profilePath();
     try {
-        // Reinitialisation
-        cards.forEach(card => { card.inv = []; });
+        // Multi-compte: on NE reset plus inv a [], on accumule les asset IDs
+        // de plusieurs profils. On retire d abord les items du profil actuel
+        // pour eviter les doublons (refresh du meme profil).
+        cards.forEach(card => {
+            if (!card.inv) card.inv = [];
+            // Retire les items deja associes a ce profil (refresh)
+            card.inv = card.inv.filter(i => i.profile !== pl);
+        });
 
         const invData = await fetchInventory(pl);
         if (!invData) return cards;
@@ -305,15 +317,28 @@ export async function fillInventoryData(cards, profileLink = null) {
                     const card = cards.find(c => c.hash === desc.market_hash_name);
                     if (card) {
                         if (!card.inv.some(i => i.id === item.id)) {
-                            card.inv.push({ id: item.id, pos: item.pos });
+                            card.inv.push({ id: item.id, pos: item.pos, profile: pl });
                         }
                     }
                 }
             }
         }
 
-        // Mise a jour de qty
+        // Mise a jour de qty (total toutes profils confondus)
         cards.forEach(c => { c.qty = c.inv.length; });
+
+        // Tag owner: les cartes avec des items de ce profil sont possedees par ce profil
+        cards.forEach(card => {
+            if (card.inv.some(i => i.profile === pl) && card.hash) {
+                card.owner = card.owner || '';
+                // On utilisera addOwnerToCard en DB (plus sur pour COALESCE)
+                const owners = card.owner.split(',').map(s => s.trim()).filter(Boolean);
+                if (!owners.includes(pl)) {
+                    owners.push(pl);
+                    card.owner = owners.join(',');
+                }
+            }
+        });
 
         const ownedCount = cards.reduce((acc, c) => acc + c.inv.length, 0);
         //ES_log(`[fillInventoryData] Termine. ${ownedCount} cartes identifiees.`);
@@ -444,6 +469,7 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
                 hash: c.hash,
                 iconUrl: c.icon_url,
                 artUrl: c.art_url,
+                owner: c.owner || '',
                 'sce stock': c.sce_stock,
                 'sce worth': c.sce_worth,
                 'sce price': c.sce_price,

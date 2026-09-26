@@ -45,6 +45,12 @@ async function main() {
                 console.log('Synchronisation unique de l historique...');
                 await syncSteamInventoryHistory(getSteamProfilePath());
                 await syncSteamMarketHistory(getSteamProfilePath());
+                // Multi-compte: sync pour tous les profils supplementaires
+                const allProfiles = getSteamProfilePaths();
+                for (let i = 1; i < allProfiles.length; i++) {
+                    await syncSteamInventoryHistory(allProfiles[i]);
+                    await syncSteamMarketHistory(allProfiles[i]);
+                }
                 console.log('Termine.');
             }
             break;
@@ -66,7 +72,7 @@ async function main() {
                 }
 
                 // Commande manuelle : bypass du cache TTL Steam
-                await syncBadgesWorkflow(getSteamProfilePath(), { forceSteam: true });
+                await syncBadgesWorkflow(getSteamProfilePaths(), { forceSteam: true });
                 console.log('Termine.');
             }
             break;
@@ -83,7 +89,7 @@ async function main() {
                 const cookies = await getSteamCookies(process.env.STEAM_AUTH_METHOD || 'auto');
                 setSteamCookie(cookies);
             }
-            await mainWorkflowGamecards(appid, getSteamProfilePath());
+            await mainWorkflowGamecards(appid, getSteamProfilePaths());
             break;
         }
 
@@ -98,6 +104,12 @@ async function main() {
                 }
                 await syncSteamInventoryHistory(getSteamProfilePath());
                 await syncSteamMarketHistory(getSteamProfilePath());
+                // Multi-compte: sync pour tous les profils supplementaires
+                const allProfiles = getSteamProfilePaths();
+                for (let i = 1; i < allProfiles.length; i++) {
+                    await syncSteamInventoryHistory(allProfiles[i]);
+                    await syncSteamMarketHistory(allProfiles[i]);
+                }
                 console.log('Historique synchronise.');
             }
             break;
@@ -118,7 +130,7 @@ async function main() {
             const appids = badges.filter(b => !b.disabled).map(b => b.appid);
             console.log(`Scan de ${appids.length} badges...`);
             // Commande manuelle : bypass du cache TTL Steam
-            await processQueue(appids, getSteamProfilePath(), { forceSteam: true });
+            await processQueue(appids, getSteamProfilePaths(), { forceSteam: true });
             break;
         }
 
@@ -134,19 +146,24 @@ async function main() {
                 setSteamCookie(cookies);
             }
             const pl = getSteamProfilePath();
+            const allProfiles = getSteamProfilePaths();
 
             // Recupere tous les badges non-desactives
             const allBadges = getAllBadgeAppids();
             const appids = allBadges.filter(b => !b.disabled).map(b => b.appid);
             console.log(`Re-fetch des cartes Steam pour ${appids.length} badges...`);
             console.log(`(Contourne SCE - plus rapide qu'un scan complet)`);
+            console.log(`Profils (${allProfiles.length}): ${allProfiles.join(', ')}`);
 
             for (const appid of appids) {
                 if (isEvent(appid)) continue;
                 try {
                     ESLOG(`Re-fetch ${appid}...`);
                     // Commande manuelle : bypass du cache TTL Steam
-                    await refetchSteamData(appid, pl, { force: true });
+                    // Multi-compte: re-fetch pour chaque profil
+                    for (const prof of allProfiles) {
+                        await refetchSteamData(appid, prof, { force: true });
+                    }
                     await SLEEP2(500);
                 } catch (e) {
                     console.error(`Erreur sur ${appid}:`, e.message);

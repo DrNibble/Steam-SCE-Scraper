@@ -51,6 +51,7 @@ function gameRowToApi(row) {
         missingCount: row.missing_count,
         badgeCrafted: row.badge_crafted ?? null,
         badgeCraftedFetchedAt: row.badge_crafted_fetched_at ?? null,
+        owner: row.owner || '',
     };
 }
 
@@ -83,6 +84,7 @@ function cardRowToApi(row) {
         steamMarketSellQty: row.steam_market_sell_qty ?? null,
         steamMarketBuyOrderEur: row.steam_market_buy_order_eur ?? null,
         steamMarketBuyOrderQty: row.steam_market_buy_order_qty ?? null,
+        owner: row.owner || '',
     };
 }
 

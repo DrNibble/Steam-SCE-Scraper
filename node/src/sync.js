@@ -1,4 +1,4 @@
-import { sleep, isSteamEvent, ES_log, getSteamProfilePath, setSteamCookie, getSteamCookie, httpGet } from './utils.js';
+import { sleep, isSteamEvent, ES_log, getSteamProfilePath, getSteamProfilePaths, setSteamCookie, getSteamCookie, httpGet } from './utils.js';
 import { getPageAppids, getAllPagesAppids, fetchSteamData, syncSteamInventoryHistory, syncSteamMarketHistory, invalidateBadgePagesCache, invalidateInventoryCache } from './steam.js';
 import { fetchSCEFresh, fetchSCEGlobalInfo, isSCEBusy, resetCreditFlag } from './sce.js';
 import { analyzeBadgeStatus } from './analyze.js';
@@ -42,9 +42,12 @@ const SCE_SCAN_INTERVAL_MS = 15 * 60 * 1000;        // Task 4: scan SCE complet 
  *   { refetchCrafted: true } pour re-fetcher le statut badge_crafted = 1
  *   (daemon npm run sync)
  */
-export async function processQueue(appids, profileLink = null, options = {}) {
+export async function processQueue(appids, profileLinks = null, options = {}) {
     const { market = true, forceSteam = false, refetchCrafted = false } = options;
-    const pl = profileLink || getSteamProfilePath();
+    // Multi-compte: profileLinks peut etre un string (un seul profil) ou un tableau
+    const profiles = Array.isArray(profileLinks) && profileLinks.length > 0
+        ? profileLinks
+        : [profileLinks || getSteamProfilePath()];
     const dbReadyAppids = [];
     const deferredAppids = [];
 
@@ -71,11 +74,14 @@ export async function processQueue(appids, profileLink = null, options = {}) {
 
             ES_log(`Traitement de ${appid}...`);
 
-            // 1. Scrap Steam (cartes + inventaire) - le cache TTL 30 min
-            // s'applique sauf forceSteam (rescans apres trade / commandes manuelles)
-            await fetchSteamData(appid, pl, { force: forceSteam, refetchCrafted });
+            // Multi-compte: fetchSteamData pour chaque profil (accumule inv + owner)
+            for (const pl of profiles) {
+                // 1. Scrap Steam (cartes + inventaire) - le cache TTL 30 min
+                // s'applique sauf forceSteam (rescans apres trade / commandes manuelles)
+                await fetchSteamData(appid, pl, { force: forceSteam, refetchCrafted });
+            }
 
-            // 2. Scrap SCE (stock + worth + price + quick-trade)
+            // 2. Scrap SCE (stock + worth + price + quick-trade) - SCE est profil-agnostique
             await fetchSCEFresh(appid);
 
             // File SCE saturee (waitTime > 1 min et pendingOffers > 10):
@@ -197,26 +203,38 @@ export async function runMarketPhase(appids) {
  *   Steam (commande manuelle npm run sync:badges) ; { refetchCrafted: true }
  *   pour re-fetcher le statut badge_crafted = 1 (daemon npm run sync)
  */
-export async function syncBadgesWorkflow(profileLink = null, options = {}) {
-    const pl = profileLink || getSteamProfilePath();
+export async function syncBadgesWorkflow(profileLinks = null, options = {}) {
+    const profiles = Array.isArray(profileLinks) && profileLinks.length > 0
+        ? profileLinks
+        : [profileLinks || getSteamProfilePath()];
     const { forceSteam = false, refetchCrafted = false } = options;
     const forceLabel = forceSteam ? ' (force, cache TTL bypass)' : ' (cache TTL actif)';
-    console.log(`\n=== Workflow scan des badges (toutes les pages)${forceLabel} ===\n`);
+    console.log(`\n=== Workflow scan des badges (toutes les pages, ${profiles.length} profil(s))${forceLabel} ===\n`);
+    console.log(`Profils: ${profiles.join(', ')}`);
     console.log(`BD actuelle: ${countGames()} jeux.`);
 
-    // 1. Scan de toutes les pages de badges (p=1..N) - force bypass le
-    // cache 1h de la liste d appids (commandes manuelles)
-    const pageAppids = await getAllPagesAppids(pl, { force: forceSteam });
-    const appids = pageAppids.filter(i => !isSteamEvent(i.appid)).map(i => i.appid);
-    console.log(`${appids.length} badges a scanner (hors evenements Steam).`);
+    // 1. Scan de toutes les pages de badges (p=1..N) pour chaque profil
+    const allAppids = new Set();
+    for (const pl of profiles) {
+        console.log(`\nScan badges pour le profil: ${pl}`);
+        const pageAppids = await getAllPagesAppids(pl, { force: forceSteam });
+        for (const item of pageAppids) {
+            if (!isSteamEvent(item.appid)) {
+                allAppids.add(item.appid);
+            }
+        }
+    }
+    const appids = [...allAppids];
+    console.log(`${appids.length} badges a scanner (hors evenements Steam, tous profils confondus).`);
 
     // 2. Phase 1: Steam (cartes + inventaire) + SCE via fetchSCEInventory
     //    (4 taches paralleles si waitTime SCE < 1 min) - fetchMarketPricesV2
     //    est differe (options.market = false) -> seuls les badges dont
     //    fetchSteamData + fetchSCEFresh ont reussi (donc a jour en DB)
     //    passent en phase 2. forceSteam passe le cache TTL Steam au travers.
+    //    Multi-compte: fetchSteamData est appele pour chaque profil.
     console.log('\n--- Phase 1: Steam + SCE (fetchSCEInventory) ---');
-    const dbReadyAppids = await processQueue(appids, pl, { market: false, forceSteam, refetchCrafted });
+    const dbReadyAppids = await processQueue(appids, profiles, { market: false, forceSteam, refetchCrafted });
 
     const failed = appids.filter(a => !dbReadyAppids.includes(a));
     if (failed.length > 0) {
@@ -249,8 +267,10 @@ export async function syncBadgesWorkflow(profileLink = null, options = {}) {
  *
  * @param {string} profileLink - Profile path Steam
  */
-async function startParallelTasks(profileLink) {
-    const pl = profileLink || getSteamProfilePath();
+async function startParallelTasks(profileLinks) {
+    const profiles = Array.isArray(profileLinks) && profileLinks.length > 0
+        ? profileLinks
+        : [profileLinks || getSteamProfilePath()];
 
     // Variable partagee: appids affectes par des trades (tache 3 -> tache 4)
     let tradeUpdatedAppIds = [];
@@ -308,31 +328,35 @@ async function startParallelTasks(profileLink) {
     }
 
     // --- Task 3: Trade history sync + fetchSteamData si trades, toutes les 5 min ---
-    // syncSteamInventoryHistory -> syncSteamMarketHistory -> si des trades sont
-    // detectes (entrees retournees), fetchSteamData sur les appids affectes
-    // (force: bypass du cache TTL Steam car un trade vient d etre detecte).
-    // Signale a la tache 4 de lancer fetchSCEFresh immediatement sur ces appids.
+    // Multi-compte: sync trade history pour chaque profil
     async function task3_TradeHistory() {
         while (true) {
             try {
-                const tradeUpdated = await syncSteamInventoryHistory(pl);
-                const marketUpdated = await syncSteamMarketHistory(pl);
-                const updatedAppIds = [...new Set([...(tradeUpdated || []), ...(marketUpdated || [])])];
+                let allUpdatedAppIds = [];
+                for (const pl of profiles) {
+                    const tradeUpdated = await syncSteamInventoryHistory(pl);
+                    const marketUpdated = await syncSteamMarketHistory(pl);
+                    const updatedAppIds = [...new Set([...(tradeUpdated || []), ...(marketUpdated || [])])];
+                    allUpdatedAppIds = [...new Set([...allUpdatedAppIds, ...updatedAppIds])];
+                }
 
-                if (updatedAppIds.length > 0) {
-                    ES_log(`[Task3-Trade] ${updatedAppIds.length} jeu(x) affecte(s) par des trades. Re-scan Steam...`);
-                    for (const appid of updatedAppIds) {
+                if (allUpdatedAppIds.length > 0) {
+                    ES_log(`[Task3-Trade] ${allUpdatedAppIds.length} jeu(x) affecte(s) par des trades. Re-scan Steam...`);
+                    for (const appid of allUpdatedAppIds) {
                         if (!isSteamEvent(appid)) {
                             try {
                                 // force: bypass du cache TTL Steam (trade detecte)
-                                await fetchSteamData(appid, pl, { force: true });
+                                // Multi-compte: re-scan pour chaque profil
+                                for (const pl of profiles) {
+                                    await fetchSteamData(appid, pl, { force: true });
+                                }
                             } catch (e) {
                                 console.error(`[Task3-Trade] Erreur fetchSteamData sur ${appid}:`, e.message);
                             }
                         }
                     }
                     // Signaler a la tache 4 de lancer fetchSCEFresh immediatement
-                    tradeUpdatedAppIds = [...new Set([...tradeUpdatedAppIds, ...updatedAppIds])];
+                    tradeUpdatedAppIds = [...new Set([...tradeUpdatedAppIds, ...allUpdatedAppIds])];
                 }
             } catch (e) {
                 console.error('[Task3-Trade] Erreur:', e.message);
@@ -439,8 +463,13 @@ async function startParallelTasks(profileLink) {
  *
  * @param {string} profileLink
  */
-export async function mainWorkflow(profileLink = null) {
+export async function mainWorkflow(profileLinks = null) {
+    const profiles = Array.isArray(profileLinks) && profileLinks.length > 0
+        ? profileLinks
+        : getSteamProfilePaths();
+    const primaryProfile = profiles[0];
     console.log('\n=== Demarrage du workflow ===\n');
+    console.log(`Profils configures (${profiles.length}): ${profiles.join(', ')}`);
 
     // --- 0. AUTHENTIFICATION STEAM ---
     // Si un cookie est deja defini dans .env (STEAM_COOKIE), on l'utilise directement
@@ -457,8 +486,8 @@ export async function mainWorkflow(profileLink = null) {
 
     // IMPORTANT: on recupere le profile path APRES l'auth, car setSteamProfilePath()
     // est appele pendant l'authentification (loginWithCredentials / getCookiesWithToken)
-    const pl = profileLink || getSteamProfilePath();
-    console.log(`[Workflow] Profile path: ${pl}`);
+    const pl = primaryProfile;
+    console.log(`[Workflow] Profile path principal: ${pl}`);
 
     // Test: verifier que les cookies sont valides pour un endpoint authentifie
     // La page /badges est publique, donc on teste avec /inventoryhistory qui necessite une connexion
@@ -511,26 +540,38 @@ export async function mainWorkflow(profileLink = null) {
 
         // 1. Synchroniser l historique des trades et du marche en premier
         console.log('1. Synchronisation de l historique des trades et du marche...');
-        await syncSteamInventoryHistory(pl);
-        await syncSteamMarketHistory(pl);
+        for (const prof of profiles) {
+            await syncSteamInventoryHistory(prof);
+            await syncSteamMarketHistory(prof);
+        }
 
-        // 2. Recuperer les appids depuis TOUTES les pages de badges (p=1..N)
+        // 2. Recuperer les appids depuis TOUTES les pages de badges (p=1..N) pour chaque profil
         console.log('2. Recuperation des appids depuis toutes les pages de badges...');
-        const pageAppids = await getAllPagesAppids(pl);
-        console.log(`   ${pageAppids.length} badges trouves.`);
+        const allPageAppids = [];
+        const seenAppids = new Set();
+        for (const prof of profiles) {
+            const pageAppids = await getAllPagesAppids(prof);
+            for (const item of pageAppids) {
+                if (!seenAppids.has(item.appid)) {
+                    seenAppids.add(item.appid);
+                    allPageAppids.push(item);
+                }
+            }
+        }
+        console.log(`   ${allPageAppids.length} badges trouves (tous profils confondus).`);
 
         // 3. Lancer le scan complet via processQueue
-        const appidsToScan = pageAppids
+        const appidsToScan = allPageAppids
             .filter(item => !isSteamEvent(item.appid))
             .map(item => item.appid);
 
         console.log(`3. Scan complet de ${appidsToScan.length} badges...`);
-        await processQueue(appidsToScan, pl, { refetchCrafted: true });
+        await processQueue(appidsToScan, profiles, { refetchCrafted: true });
         console.log('4. Scan complet termine.');
 
         // 5. Analyser tous les badges
         console.log('5. Analyse des badges...');
-        pageAppids.forEach(item => {
+        allPageAppids.forEach(item => {
             if (!isSteamEvent(item.appid)) {
                 analyzeBadgeStatus(item.appid);
             }
@@ -552,15 +593,17 @@ export async function mainWorkflow(profileLink = null) {
     //      si trades detectes (toutes les 5 min)
     //   4) fetchSCEFresh sur appids en DB (toutes les 15 min ou immediatement
     //      si la tache 3 a des entrees)
-    await startParallelTasks(pl);
+    await startParallelTasks(profiles);
 }
 
 /**
  * Workflow pour un appid specifique (page gamecards)
  */
-export async function mainWorkflowGamecards(appid, profileLink = null) {
-    const pl = profileLink || getSteamProfilePath();
-    console.log(`\n=== Workflow Gamecards: ${appid} ===\n`);
+export async function mainWorkflowGamecards(appid, profileLinks = null) {
+    const profiles = Array.isArray(profileLinks) && profileLinks.length > 0
+        ? profileLinks
+        : [profileLinks || getSteamProfilePath()];
+    console.log(`\n=== Workflow Gamecards: ${appid} (${profiles.length} profil(s)) ===\n`);
 
     if (isSteamEvent(appid)) {
         console.log('Evenement Steam ignore.');
@@ -568,7 +611,7 @@ export async function mainWorkflowGamecards(appid, profileLink = null) {
     }
 
     // Force le refresh (commande manuelle : bypass du cache TTL)
-    await processQueue([appid], pl, { forceSteam: true });
+    await processQueue([appid], profiles, { forceSteam: true });
 
     console.log('\n=== Workflow termine ===\n');
 }

@@ -12,6 +12,40 @@ export const INVENTORY_PAGE_DELAY = parseInt(process.env.INVENTORY_PAGE_DELAY ||
 
 export const STEAM_PROFILE_PATH = process.env.STEAM_PROFILE_PATH || 'my';
 
+// --- MULTI-COMPTE STEAM ---
+// STEAM_PROFILE_PATHS: liste de profile links separes par des virgules
+// (ex: "my,profiles/76561198028880269,id/Dr_Nibble")
+// Le premier est le profil principal (auth, trade offers, etc.)
+// Tous sont scannees pour les badges et l inventaire.
+export const STEAM_PROFILE_PATHS = (process.env.STEAM_PROFILE_PATHS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+// Profile paths dynamiques: sera defini par auth.js au demarrage
+let _steamProfilePaths = STEAM_PROFILE_PATHS.length > 0
+    ? [...STEAM_PROFILE_PATHS]
+    : [process.env.STEAM_PROFILE_PATH || 'my'];
+
+export function getSteamProfilePaths() { return [..._steamProfilePaths]; }
+export function setSteamProfilePaths(paths) { _steamProfilePaths = [...paths]; }
+
+/**
+ * Ajoute un profile link a une liste d owners separes par des virgules.
+ * Evite les doublons.
+ * @param {string} existingOwners - liste actuelle (ex: "my,profiles/123")
+ * @param {string} newOwner - profile link a ajouter
+ * @returns {string} nouvelle liste (ex: "my,profiles/123,profiles/456")
+ */
+export function addOwner(existingOwners, newOwner) {
+    if (!newOwner) return existingOwners || '';
+    const owners = (existingOwners || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (!owners.includes(newOwner)) {
+        owners.push(newOwner);
+    }
+    return owners.join(',');
+}
+
 // AppIDs d'evenements Steam (Sales, Awards, etc.) - a definir dans .env, separes par des virgules
 export const EVENT_APP_IDS = new Set(
     (process.env.EVENT_APP_IDS || '')
