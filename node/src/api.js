@@ -52,6 +52,14 @@ function gameRowToApi(row) {
         badgeCrafted: row.badge_crafted ?? null,
         badgeCraftedFetchedAt: row.badge_crafted_fetched_at ?? null,
         badgeCraftedOwner: row.badge_crafted_owner ?? null,
+        fetchedAtByProfile: row.fetched_at_by_profile ? JSON.parse(row.fetched_at_by_profile) : {},
+        lasttradeByProfile: row.lasttrade_by_profile ? JSON.parse(row.lasttrade_by_profile) : {},
+        badgeCraftedByProfile: row.badge_crafted_by_profile ? JSON.parse(row.badge_crafted_by_profile) : {},
+        badgeCraftedFetchedAtByProfile: row.badge_crafted_fetched_at_by_profile ? JSON.parse(row.badge_crafted_fetched_at_by_profile) : {},
+        missingCountByProfile: row.missing_count_by_profile ? JSON.parse(row.missing_count_by_profile) : {},
+        isCompletableViaTradeByProfile: row.is_completable_via_trade_by_profile ? JSON.parse(row.is_completable_via_trade_by_profile) : {},
+        totalCostSceByProfile: row.total_cost_sce_by_profile ? JSON.parse(row.total_cost_sce_by_profile) : {},
+        hasExpensiveCardByProfile: row.has_expensive_card_by_profile ? JSON.parse(row.has_expensive_card_by_profile) : {},
         owner: row.owner || '',
     };
 }

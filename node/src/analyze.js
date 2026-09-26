@@ -1,5 +1,5 @@
-import { getGame, getCards, upsertGame, upsertCards, getMeta } from './db.js';
-import { isSteamEvent, ES_log, addOwner } from './utils.js';
+import { getGame, getCards, upsertGame, upsertCards, getMeta, setGameProfileJSON } from './db.js';
+import { isSteamEvent, ES_log, addOwner, getSteamProfilePaths } from './utils.js';
 
 /**
  * Analyse les donnees Steam et SCE pour determiner l etat de completion d un badge.
@@ -44,6 +44,7 @@ export function analyzeBadgeStatus(appid) {
     let maxPrice = 0;
     let expensiveCardName = '';
     let expensiveIsOwned = false;
+    let expensiveCardHash = null; // Multi-compte: pour verifier la possession par profil
     let totalAvailableFromBot = 0;
     let missingCount = 0;
     let totalCostSCE = 0;
@@ -64,6 +65,7 @@ export function analyzeBadgeStatus(appid) {
             maxPrice = marketPrice;
             expensiveCardName = card.name;
             expensiveIsOwned = (myQty > 0);
+            expensiveCardHash = card.hash;
         }
 
         const stock = parseInt(card['sce stock']) || 0;
@@ -126,6 +128,66 @@ export function analyzeBadgeStatus(appid) {
         ...c,
         qty: c.qty,
     })));
+
+    // --- 5. CALCULS PAR PROFIL (multi-compte) ---
+    // Calcule les memes indicateurs mais pour chaque profil individuellement,
+    // en se basant sur qtyByProfile au lieu de l inventaire agrege.
+    const allProfiles = getSteamProfilePaths();
+    if (allProfiles.length > 0) {
+        const missingByProfile = {};
+        const completableTradeByProfile = {};
+        const totalCostSceByProfile = {};
+        const hasExpensiveCardByProfile = {};
+
+        for (const profile of allProfiles) {
+            let profileOwnedQty = 0;
+            let profileMissingCount = 0;
+            let profileTotalCostSCE = 0;
+            let profileAllMissingAvailable = true;
+
+            for (const card of cards) {
+                const profileQty = card.qtyByProfile?.[profile] || 0;
+                profileOwnedQty += profileQty;
+
+                if (profileQty === 0) {
+                    profileMissingCount++;
+                    const stock = parseInt(card['sce stock']) || 0;
+                    if (stock > 1) {
+                        profileTotalCostSCE += (parseInt(card['sce price']) || 0);
+                    } else {
+                        profileAllMissingAvailable = false;
+                    }
+                }
+            }
+
+            missingByProfile[profile] = profileMissingCount;
+            completableTradeByProfile[profile] = (profileOwnedQty >= setCardsTotal) ? 1 : 0;
+            totalCostSceByProfile[profile] = profileTotalCostSCE;
+
+            // Carte chere par profil: meme carte, mais isOwned depend du profil
+            if (expensiveInfo) {
+                const expensiveCard = expensiveCardHash
+                    ? cards.find(c => c.hash === expensiveCardHash)
+                    : null;
+                const profileOwnsExpensive = expensiveCard
+                    ? ((expensiveCard.qtyByProfile?.[profile] || 0) > 0)
+                    : false;
+                hasExpensiveCardByProfile[profile] = {
+                    ...expensiveInfo,
+                    isOwned: profileOwnsExpensive,
+                };
+            } else {
+                hasExpensiveCardByProfile[profile] = null;
+            }
+        }
+
+        setGameProfileJSON(appid, {
+            missing_count_by_profile: missingByProfile,
+            is_completable_via_trade_by_profile: completableTradeByProfile,
+            total_cost_sce_by_profile: totalCostSceByProfile,
+            has_expensive_card_by_profile: hasExpensiveCardByProfile,
+        });
+    }
 
     ES_log(`[analyzeBadgeStatus] ${appid}: owned=${totalOwnedQty}/${setCardsTotal}, missing=${missingCount}, cost=${totalCostSCE}c`);
 

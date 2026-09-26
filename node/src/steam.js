@@ -1,6 +1,6 @@
 import * as cheerio from 'cheerio';
 import { httpGet, httpGetJSON, clean, isSteamEvent, sleep, parseSteamDateToMs, getSteamCookie, getSteamProfilePath, getSteamProfilePaths, extractSessionIdFromCookies, INVENTORY_PAGE_DELAY, ES_log } from './utils.js';
-import { upsertBadgeAppid, upsertGame, upsertCards, getMeta, setMeta, getGame, getBadgeAppid, getCards, updateCardMarketPrices, setGameBadgeCrafted, addOwnerToGame, removeOwnerFromGame, getGamesWithOwner } from './db.js';
+import { upsertBadgeAppid, upsertGame, upsertCards, getGame, getBadgeAppid, getCards, updateCardMarketPrices, setGameBadgeCrafted, addOwnerToGame, removeOwnerFromGame, getGamesWithOwner, getMetaProfile, setMetaProfile, updateGameProfileFields } from './db.js';
 
 // Cookie Steam dynamique (recupere via auth.js ou .env)
 function steamCookie() { return getSteamCookie(); }
@@ -391,15 +391,20 @@ export async function fetchBadgeCrafted(appid, profileLink = null, options = {})
     if (isSteamEvent(appid)) return null;
     const { force = false, refetchCrafted = false } = options;
 
-    // Cache DB : evite de re-fetch la page gamecards a chaque scan complet
+    // Cache DB par profil : evite de re-fetch la page gamecards a chaque scan complet
     const existing = getGame(appid);
-    const crafted = existing?.badge_crafted ?? null;
+    let craftedByProfile = {};
+    try { craftedByProfile = JSON.parse(existing?.badge_crafted_by_profile || '{}'); } catch { /* ignore */ }
+    let fetchedAtByProfile = {};
+    try { fetchedAtByProfile = JSON.parse(existing?.badge_crafted_fetched_at_by_profile || '{}'); } catch { /* ignore */ }
+    // Fallback sur les colonnes globales pour backward compat
+    const crafted = craftedByProfile[pl] ?? existing?.badge_crafted ?? null;
     if (!force) {
         if (crafted === 1 && !refetchCrafted) {
            // ES_log(`[fetchBadgeCrafted] ${appid}: badge crafte (cache DB), pas de re-check.`);
             return true;
         }
-        const checkedAt = Number(existing?.badge_crafted_fetched_at ?? 0);
+        const checkedAt = Number(fetchedAtByProfile[pl] ?? existing?.badge_crafted_fetched_at ?? 0);
         if (crafted === 0 && checkedAt > 0
             && Date.now() - checkedAt < STEAM_CACHE_TTL.BADGE_CRAFTED_FALSE_MS) {
             //ES_log(`[fetchBadgeCrafted] ${appid}: badge non crafte verifie recemment, pas de re-check.`);
@@ -456,8 +461,12 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
     // laisse s evaluer meme sur un cache-hit pour respecter son TTL
     if (!force) {
         const existingGame = getGame(appid);
-        if (existingGame?.fetched_at
-            && Date.now() - existingGame.fetched_at < STEAM_CACHE_TTL.STEAM_DATA_MS
+        // Multi-compte: cache TTL par profil (fetched_at_by_profile)
+        let fetchedAtByProfile = {};
+        try { fetchedAtByProfile = JSON.parse(existingGame?.fetched_at_by_profile || '{}'); } catch { /* ignore */ }
+        const profileFetchedAt = fetchedAtByProfile[pl] ?? existingGame?.fetched_at ?? 0;
+        if (profileFetchedAt
+            && Date.now() - profileFetchedAt < STEAM_CACHE_TTL.STEAM_DATA_MS
             && (getCards(appid) || []).length > 0) {
             ES_log(`[fetchSteamData] ${appid}: donnees Steam fraiches (< ${STEAM_CACHE_TTL.STEAM_DATA_MS / 60000} min), reutilisees sans requete.`);
 
@@ -493,7 +502,7 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
             await fillInventoryData(cards, pl);
             upsertCards(appid, cards);
 
-            await fetchBadgeCrafted(appid, null, { force, refetchCrafted });
+            await fetchBadgeCrafted(appid, pl, { force, refetchCrafted });
             return { ...existingGame, cards };
         }
     }
@@ -566,11 +575,13 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
         // Sauvegarde en DB
         upsertGame(appid, gameData);
         upsertCards(appid, cards);
+        // Multi-compte: timestamp du fetch Steam par profil
+        updateGameProfileFields(appid, pl, { fetched_at_by_profile: Date.now() });
 
-        // Badge deja genere par le COMPTE PRINCIPAL ? (best-effort : on garde la valeur existante si indetermine)
-        // fetchBadgeCrafted ecrit lui-meme le resultat en DB (cache badge_crafted)
+        // Badge deja genere par ce profil ? (best-effort : on garde la valeur existante si indetermine)
+        // fetchBadgeCrafted ecrit lui-meme le resultat en DB (cache badge_crafted par profil)
         // et herite du mode force de fetchSteamData
-        await fetchBadgeCrafted(appid, null, { force, refetchCrafted });
+        await fetchBadgeCrafted(appid, pl, { force, refetchCrafted });
 
         return { ...gameData, cards };
     } catch (error) {
@@ -589,7 +600,8 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
 export async function syncSteamInventoryHistory(profileLink = null) {
     const pl = profileLink || profilePath();
     let startTime = null;
-    const originalStopTimestamp = parseInt(getMeta('lasttrade', '0'), 10) || 0;
+    // Multi-compte: curseur lasttrade par profil (fallback global pour backward compat)
+    const originalStopTimestamp = parseInt(getMetaProfile('lasttrade', pl, '0'), 10) || 0;
     // Overlap de 10 min : Steam peut mettre du temps a afficher un trade dans
     // l historique. Sans overlap, un trade accepte a T mais visible seulement a
     // T+5min serait saute si le curseur a deja avance. On re-traite les 10
@@ -709,6 +721,8 @@ export async function syncSteamInventoryHistory(profileLink = null) {
                                 gamename: gameName,
                                 lasttrade: timestamp,
                             });
+                            // Multi-compte: lasttrade par profil
+                            updateGameProfileFields(appid, pl, { lasttrade_by_profile: timestamp });
                             updatedAppIds.add(String(appid));
                             ES_log(`[syncSteamInventoryHistory] -> ${gameName} (${appid}) lasttrade mis a jour`);
                         }
@@ -718,14 +732,14 @@ export async function syncSteamInventoryHistory(profileLink = null) {
 
             ES_log(`[syncSteamInventoryHistory] ${newTradeCount} nouveau(x) trade(s) traite(s) sur cette page.`);
 
-            // Mise a jour du curseur global (premiere page uniquement)
+            // Mise a jour du curseur par profil (premiere page uniquement)
             if (!startTime) {
                 const firstRow = $(rows[0]);
                 const latestDate = (firstRow.find('.tradehistory_date').text() || '').replace(/\t|\n/g, ' ').trim();
                 if (latestDate) {
                     const ts = parseSteamDateToMs(latestDate);
                     if (ts > 0) {
-                        setMeta('lasttrade', String(ts));
+                        setMetaProfile('lasttrade', pl, String(ts));
                        // ES_log(`[syncSteamInventoryHistory] Curseur lasttrade mis a jour: ${ts} (${new Date(ts).toLocaleString()})`);
                     }
                 }
@@ -765,7 +779,9 @@ export async function syncSteamInventoryHistory(profileLink = null) {
  * mais avec un curseur separe (lastmarkettrade) pour eviter les conflits.
  */
 export async function syncSteamMarketHistory(profileLink = null) {
-    const originalStopTimestamp = parseInt(getMeta('lastmarkettrade', '0'), 10) || 0;
+    const pl = profileLink || profilePath();
+    // Multi-compte: curseur lastmarkettrade par profil (fallback global pour backward compat)
+    const originalStopTimestamp = parseInt(getMetaProfile('lastmarkettrade', pl, '0'), 10) || 0;
     // Overlap de 10 min : meme rationale que syncSteamInventoryHistory
     const OVERLAP_MS = 10 * 60 * 1000;
     const stopTimestamp = Math.max(0, originalStopTimestamp - OVERLAP_MS);
@@ -908,6 +924,8 @@ export async function syncSteamMarketHistory(profileLink = null) {
                         gamename: gameName,
                         lasttrade: timestamp,
                     });
+                    // Multi-compte: lasttrade par profil
+                    updateGameProfileFields(appid, pl, { lasttrade_by_profile: timestamp });
                     updatedAppIds.add(String(appid));
                     ES_log(`[syncSteamMarketHistory] -> ${gameName} (${appid}) lasttrade mis a jour`);
                 }
@@ -915,11 +933,11 @@ export async function syncSteamMarketHistory(profileLink = null) {
 
             ES_log(`[syncSteamMarketHistory] ${newCount} nouvelle(s) transaction(s) traitee(s) sur cette page.`);
 
-            // Mise a jour du curseur global (premiere page uniquement, evenement le plus recent)
+            // Mise a jour du curseur par profil (premiere page uniquement, evenement le plus recent)
             if (start === 0 && sortedEvents.length > 0) {
                 const latestTs = sortedEvents[0].time_event * 1000 + Math.floor((sortedEvents[0].time_event_fraction || 0) / 1e6);
                 if (latestTs > 0) {
-                    setMeta('lastmarkettrade', String(latestTs));
+                    setMetaProfile('lastmarkettrade', pl, String(latestTs));
                    // ES_log(`[syncSteamMarketHistory] Curseur lastmarkettrade mis a jour: ${latestTs} (${new Date(latestTs).toLocaleString()})`);
                 }
             }

@@ -79,6 +79,14 @@ CREATE TABLE IF NOT EXISTS games (
     badge_crafted                  INTEGER,         -- NULL = pas encore verifie, 0 = pas de badge, 1 = badge deja genere
     badge_crafted_fetched_at       INTEGER,          -- date du dernier check gamecards (cache anti rate-limit)
     badge_crafted_owner            TEXT,             -- profile link du compte qui a crafte le badge (multi-compte)
+    fetched_at_by_profile          TEXT,             -- JSON: { "my": ts, "profiles/123": ts } timestamp du dernier fetch Steam par profil
+    lasttrade_by_profile           TEXT,             -- JSON: { "my": ts, "profiles/123": ts } timestamp du dernier trade par profil
+    badge_crafted_by_profile       TEXT,             -- JSON: { "my": 1, "profiles/123": 0 } statut badge crafte par profil
+    badge_crafted_fetched_at_by_profile TEXT,       -- JSON: { "my": ts } date du check badge par profil
+    missing_count_by_profile       TEXT,             -- JSON: { "my": 3, "profiles/123": 5 } cartes manquantes par profil
+    is_completable_via_trade_by_profile TEXT,       -- JSON: { "my": 1, "profiles/123": 0 } completitude via trade par profil
+    total_cost_sce_by_profile      TEXT,             -- JSON: { "my": 100, "profiles/123": 200 } cout SCE par profil
+    has_expensive_card_by_profile  TEXT,             -- JSON: { "my": {...}, "profiles/123": null } carte chere par profil
     owner                          TEXT              -- liste des profile links possedant ce jeu (separes par des virgules)
 );
 
@@ -133,6 +141,15 @@ export function initDB() {
         'ALTER TABLE games ADD COLUMN badge_crafted_fetched_at INTEGER',
         // Multi-compte: profile link du compte qui a crafte le badge
         'ALTER TABLE games ADD COLUMN badge_crafted_owner TEXT',
+        // Multi-compte: variables par profil (JSON)
+        'ALTER TABLE games ADD COLUMN fetched_at_by_profile TEXT',
+        'ALTER TABLE games ADD COLUMN lasttrade_by_profile TEXT',
+        'ALTER TABLE games ADD COLUMN badge_crafted_by_profile TEXT',
+        'ALTER TABLE games ADD COLUMN badge_crafted_fetched_at_by_profile TEXT',
+        'ALTER TABLE games ADD COLUMN missing_count_by_profile TEXT',
+        'ALTER TABLE games ADD COLUMN is_completable_via_trade_by_profile TEXT',
+        'ALTER TABLE games ADD COLUMN total_cost_sce_by_profile TEXT',
+        'ALTER TABLE games ADD COLUMN has_expensive_card_by_profile TEXT',
         // Lien de trade rapide SCE (href du bouton btn-primary sur la page inventory)
         'ALTER TABLE cards ADD COLUMN sce_quick_trade TEXT',
         // Sell/buy order columns (deja dans CREATE TABLE mais absentes des anciennes bases)
@@ -248,8 +265,118 @@ export function getGamesWithCards() {
  * @param {string|null} [owner] - profile link du compte qui a crafte le badge
  */
 export function setGameBadgeCrafted(appid, crafted, owner = null) {
+    const craftedVal = crafted ? 1 : 0;
+    const now = Date.now();
     db.prepare('UPDATE games SET badge_crafted = ?, badge_crafted_fetched_at = ?, badge_crafted_owner = ? WHERE appid = ?')
-        .run(crafted ? 1 : 0, Date.now(), owner, String(appid));
+        .run(craftedVal, now, owner, String(appid));
+    // Multi-compte: met a jour aussi les champs par profil
+    if (owner) {
+        updateGameProfileFields(appid, owner, {
+            badge_crafted_by_profile: craftedVal,
+            badge_crafted_fetched_at_by_profile: now,
+        });
+    }
+}
+
+// --- PER-PROFILE HELPERS (multi-compte) ---
+
+/**
+ * Sanitize un profile link pour usage comme cle meta.
+ * "profiles/76561198028880269" -> "profiles_76561198028880269"
+ */
+function profileMetaKey(profile) {
+    return profile.replace(/[/\\]/g, '_');
+}
+
+/**
+ * Recupere une valeur meta pour un profil specifique.
+ * Fallback sur la cle globale si la cle profil n existe pas (migration).
+ * @param {string} key - cle meta de base (ex: "lasttrade")
+ * @param {string} profile - profile link
+ * @param {string} defaultValue - valeur par defaut si non trouve
+ * @returns {string}
+ */
+export function getMetaProfile(key, profile, defaultValue = null) {
+    const profileKey = `${key}_${profileMetaKey(profile)}`;
+    const profileValue = getMeta(profileKey, null);
+    if (profileValue !== null) return profileValue;
+    // Fallback: cle globale (backward compat)
+    return getMeta(key, defaultValue);
+}
+
+/**
+ * Definit une valeur meta pour un profil specifique.
+ * @param {string} key - cle meta de base (ex: "lasttrade")
+ * @param {string} profile - profile link
+ * @param {string} value - valeur a stocker
+ */
+export function setMetaProfile(key, profile, value) {
+    const profileKey = `${key}_${profileMetaKey(profile)}`;
+    setMeta(profileKey, value);
+}
+
+// Liste des colonnes par profil valides (anti-injection SQL)
+const VALID_PROFILE_COLUMNS = new Set([
+    'fetched_at_by_profile',
+    'lasttrade_by_profile',
+    'badge_crafted_by_profile',
+    'badge_crafted_fetched_at_by_profile',
+    'missing_count_by_profile',
+    'is_completable_via_trade_by_profile',
+    'total_cost_sce_by_profile',
+    'has_expensive_card_by_profile',
+]);
+
+/**
+ * Met a jour plusieurs champs JSON par profil en une seule operation.
+ * Lit les valeurs JSON existantes, ajoute/met a jour le profil donne,
+ * et ecrit le tout en DB.
+ * @param {string} appid
+ * @param {string} profile - profile link
+ * @param {Object} fields - { column: value, ... } (colonnes par profil)
+ */
+export function updateGameProfileFields(appid, profile, fields) {
+    const columns = Object.keys(fields);
+    for (const col of columns) {
+        if (!VALID_PROFILE_COLUMNS.has(col)) {
+            throw new Error(`updateGameProfileFields: colonne invalide: ${col}`);
+        }
+    }
+    const selectCols = columns.join(', ');
+    const row = db.prepare(`SELECT ${selectCols} FROM games WHERE appid = ?`).get(String(appid));
+    if (!row) return;
+    const setClauses = [];
+    const values = [];
+    for (const col of columns) {
+        let data = {};
+        try { data = JSON.parse(row[col] || '{}'); } catch { /* ignore */ }
+        data[profile] = fields[col];
+        setClauses.push(`${col} = ?`);
+        values.push(JSON.stringify(data));
+    }
+    values.push(String(appid));
+    db.prepare(`UPDATE games SET ${setClauses.join(', ')} WHERE appid = ?`).run(...values);
+}
+
+/**
+ * Ecrit directement l objet JSON complet pour une colonne par profil
+ * (utilise par analyzeBadgeStatus qui calcule tous les profils a la fois).
+ * @param {string} appid
+ * @param {Object} fields - { column: fullJSONObject, ... }
+ */
+export function setGameProfileJSON(appid, fields) {
+    const columns = Object.keys(fields);
+    const setClauses = [];
+    const values = [];
+    for (const col of columns) {
+        if (!VALID_PROFILE_COLUMNS.has(col)) {
+            throw new Error(`setGameProfileJSON: colonne invalide: ${col}`);
+        }
+        setClauses.push(`${col} = ?`);
+        values.push(JSON.stringify(fields[col]));
+    }
+    values.push(String(appid));
+    db.prepare(`UPDATE games SET ${setClauses.join(', ')} WHERE appid = ?`).run(...values);
 }
 
 // --- OWNER helpers (multi-compte) ---
