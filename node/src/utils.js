@@ -46,6 +46,18 @@ export function addOwner(existingOwners, newOwner) {
     return owners.join(',');
 }
 
+/**
+ * Retire un profile link d une liste d owners separes par des virgules.
+ * @param {string} existingOwners - liste actuelle (ex: "my,profiles/123")
+ * @param {string} ownerToRemove - profile link a retirer
+ * @returns {string} nouvelle liste sans le profile link retire
+ */
+export function removeOwner(existingOwners, ownerToRemove) {
+    if (!ownerToRemove) return existingOwners || '';
+    const owners = (existingOwners || '').split(',').map(s => s.trim()).filter(Boolean);
+    return owners.filter(o => o !== ownerToRemove).join(',');
+}
+
 // AppIDs d'evenements Steam (Sales, Awards, etc.) - a definir dans .env, separes par des virgules
 export const EVENT_APP_IDS = new Set(
     (process.env.EVENT_APP_IDS || '')

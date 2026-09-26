@@ -563,6 +563,16 @@ L'inventaire des cartes est **accumulé** à travers les profils : chaque item d
 
 Lors d'un re-scan d'un profil, les items de ce profil sont d'abord retirés (pour éviter les doublons) puis ré-ajoutés avec les données fraîches.
 
+### Reflet exact de l'inventaire (`cards.owner`)
+
+Le champ `owner` est **reconstruit à chaque scan** depuis `inv` — il reflète exactement quels profils possèdent au moins un exemplaire de la carte. Si un profil vend ou échange toutes ses cartes d'un type, il est **automatiquement retiré** de `owner` au prochain scan de son inventaire.
+
+```
+fillInventoryData: card.owner = profils uniques dans card.inv
+```
+
+De même, `games.owner` est nettoyé après chaque scan de badges : si un profil n'a plus un badge (jeu remboursé, etc.), il est retiré de `games.owner` via `removeOwnerFromGame()`.
+
 ### Comportement multi-profils
 
 | Fonctionnalité | Comportement |

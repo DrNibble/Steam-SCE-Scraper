@@ -1,6 +1,6 @@
 import * as cheerio from 'cheerio';
 import { httpGet, httpGetJSON, clean, isSteamEvent, sleep, parseSteamDateToMs, getSteamCookie, getSteamProfilePath, extractSessionIdFromCookies, INVENTORY_PAGE_DELAY, ES_log } from './utils.js';
-import { upsertBadgeAppid, upsertGame, upsertCards, getMeta, setMeta, getGame, getBadgeAppid, getCards, updateCardMarketPrices, setGameBadgeCrafted, addOwnerToGame, addOwnerToCard } from './db.js';
+import { upsertBadgeAppid, upsertGame, upsertCards, getMeta, setMeta, getGame, getBadgeAppid, getCards, updateCardMarketPrices, setGameBadgeCrafted, addOwnerToGame, addOwnerToCard, removeOwnerFromGame, getGamesWithOwner } from './db.js';
 
 // Cookie Steam dynamique (recupere via auth.js ou .env)
 function steamCookie() { return getSteamCookie(); }
@@ -327,17 +327,12 @@ export async function fillInventoryData(cards, profileLink = null) {
         // Mise a jour de qty (total toutes profils confondus)
         cards.forEach(c => { c.qty = c.inv.length; });
 
-        // Tag owner: les cartes avec des items de ce profil sont possedees par ce profil
+        // Rebuild owner: reflet exact de l'inventaire.
+// owner = liste des profils qui ont au moins 1 item dans inv
         cards.forEach(card => {
-            if (card.inv.some(i => i.profile === pl) && card.hash) {
-                card.owner = card.owner || '';
-                // On utilisera addOwnerToCard en DB (plus sur pour COALESCE)
-                const owners = card.owner.split(',').map(s => s.trim()).filter(Boolean);
-                if (!owners.includes(pl)) {
-                    owners.push(pl);
-                    card.owner = owners.join(',');
-                }
-            }
+            if (!card.hash) return;
+            const profiles = [...new Set(card.inv.map(i => i.profile).filter(Boolean))];
+            card.owner = profiles.join(',');
         });
 
         const ownedCount = cards.reduce((acc, c) => acc + c.inv.length, 0);
@@ -502,15 +497,37 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
         if (data.eresult !== 1 || !data.badgedata) return null;
 
         // Initialisation des cartes - hash = market_hash_name brut (sans nettoyage)
+        // Multi-compte: on charge l'inv et owner existants depuis la DB pour ne pas
+        // perdre les items des autres profils lors d'un refresh du set (cache-miss).
+        const dbCards = getCards(appid) || [];
+        const dbCardsByHash = {};
+        for (const c of dbCards) {
+            if (c.hash) dbCardsByHash[c.hash] = c;
+        }
         const cards = data.badgedata.rgCards.map((card, index) => {
+            const existing = card.markethash ? dbCardsByHash[card.markethash] : null;
             return {
                 name: card.name,
                 qty: card.owned || 0,  // Fix: le script original avait un bug (card.owned || 0, 10) qui donnait toujours 10
                 index: index,
-                inv: [],
+                inv: existing ? JSON.parse(existing.inv_json || '[]') : [],
                 hash: card.markethash,
                 iconUrl: card.imgurl,
-                artUrl: card.arturl
+                artUrl: card.arturl,
+                owner: existing?.owner || '',
+                'sce stock': existing?.sce_stock || 0,
+                'sce worth': existing?.sce_worth || 0,
+                'sce price': existing?.sce_price || 0,
+                'sce marketPriceUSD': existing?.sce_market_price_usd || 0,
+                'sce quick-trade': existing?.sce_quick_trade || null,
+                steamMarketPriceEur: existing?.steam_market_price_eur,
+                steamMarketLastSalePriceEur: existing?.steam_market_last_sale_price_eur,
+                steamMarketSales7d: existing?.steam_market_sales_7d,
+                steamMarketFetchedAt: existing?.steam_market_fetched_at,
+                steamMarketSellPriceEur: existing?.steam_market_sell_price_eur,
+                steamMarketSellQty: existing?.steam_market_sell_qty,
+                steamMarketBuyOrderEur: existing?.steam_market_buy_order_eur,
+                steamMarketBuyOrderQty: existing?.steam_market_buy_order_qty,
             };
         });
 

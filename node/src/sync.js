@@ -2,7 +2,7 @@ import { sleep, isSteamEvent, ES_log, getSteamProfilePath, getSteamProfilePaths,
 import { getPageAppids, getAllPagesAppids, fetchSteamData, syncSteamInventoryHistory, syncSteamMarketHistory, invalidateBadgePagesCache, invalidateInventoryCache } from './steam.js';
 import { fetchSCEFresh, fetchSCEGlobalInfo, isSCEBusy, resetCreditFlag } from './sce.js';
 import { analyzeBadgeStatus } from './analyze.js';
-import { getAllBadgeAppids, getIncompleteBadgeAppids, getGame, purgeCache, getMeta, setMeta, isDBEmpty, countGames, getAllGames } from './db.js';
+import { getAllBadgeAppids, getIncompleteBadgeAppids, getGame, purgeCache, getMeta, setMeta, isDBEmpty, countGames, getAllGames, getGamesWithOwner, removeOwnerFromGame } from './db.js';
 import { getSteamCookies } from './auth.js';
 import { fetchMarketPricesV2, fetchSingleCardPrice } from './market.js';
 import { startMarketWorker, enqueueGameCards, enqueueStaleCards, getQueueStats, PRIORITY } from './marketQueue.js';
@@ -218,10 +218,25 @@ export async function syncBadgesWorkflow(profileLinks = null, options = {}) {
     for (const pl of profiles) {
         console.log(`\nScan badges pour le profil: ${pl}`);
         const pageAppids = await getAllPagesAppids(pl, { force: forceSteam });
+        const currentAppids = new Set();
         for (const item of pageAppids) {
             if (!isSteamEvent(item.appid)) {
                 allAppids.add(item.appid);
+                currentAppids.add(item.appid);
             }
+        }
+        // Nettoyage games.owner: retirer ce profil des jeux qu'il ne possede plus.
+        // On compare les appids actuels du profil avec ceux en DB ou il figure comme owner.
+        const ownedGames = getGamesWithOwner(pl);
+        let removedCount = 0;
+        for (const game of ownedGames) {
+            if (!currentAppids.has(game.appid)) {
+                removeOwnerFromGame(game.appid, pl);
+                removedCount++;
+            }
+        }
+        if (removedCount > 0) {
+            console.log(`  Nettoyage owner: ${removedCount} jeu(x) ou le profil ${pl} n'a plus de badge.`);
         }
     }
     const appids = [...allAppids];
@@ -551,10 +566,21 @@ export async function mainWorkflow(profileLinks = null) {
         const seenAppids = new Set();
         for (const prof of profiles) {
             const pageAppids = await getAllPagesAppids(prof);
+            const currentAppids = new Set();
             for (const item of pageAppids) {
                 if (!seenAppids.has(item.appid)) {
                     seenAppids.add(item.appid);
                     allPageAppids.push(item);
+                }
+                if (!isSteamEvent(item.appid)) {
+                    currentAppids.add(item.appid);
+                }
+            }
+            // Nettoyage games.owner: retirer ce profil des jeux qu'il ne possede plus
+            const ownedGames = getGamesWithOwner(prof);
+            for (const game of ownedGames) {
+                if (!currentAppids.has(game.appid)) {
+                    removeOwnerFromGame(game.appid, prof);
                 }
             }
         }

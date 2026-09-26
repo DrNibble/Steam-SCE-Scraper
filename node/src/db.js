@@ -249,7 +249,7 @@ export function setGameBadgeCrafted(appid, crafted) {
 
 // --- OWNER helpers (multi-compte) ---
 
-import { addOwner } from './utils.js';
+import { addOwner, removeOwner } from './utils.js';
 
 /**
  * Ajoute un profile link a la liste d owners d un jeu (appid).
@@ -275,6 +275,28 @@ export function addOwnerToCard(appid, hash, owner) {
     if (!row) return;
     const newOwner = addOwner(row.owner, owner);
     db.prepare('UPDATE cards SET owner = ? WHERE appid = ? AND hash = ?').run(newOwner, String(appid), hash);
+}
+
+/**
+ * Retire un profile link de la liste d owners d un jeu.
+ * @param {string} appid
+ * @param {string} owner - profile link a retirer
+ */
+export function removeOwnerFromGame(appid, owner) {
+    const row = db.prepare('SELECT owner FROM games WHERE appid = ?').get(String(appid));
+    if (!row) return;
+    const newOwner = removeOwner(row.owner, owner);
+    db.prepare('UPDATE games SET owner = ? WHERE appid = ?').run(newOwner, String(appid));
+}
+
+/**
+ * Retourne tous les jeux ou un profile link figure dans owner.
+ * @param {string} owner - profile link a chercher
+ * @returns {Array} - tableau de {appid, owner}
+ */
+export function getGamesWithOwner(owner) {
+    return db.prepare("SELECT appid, owner FROM games WHERE owner IS NOT NULL AND owner != '' AND (',' || owner || ',') LIKE ?")
+        .all(`%,${owner},%`);
 }
 
 // --- CARD helpers ---
@@ -323,7 +345,7 @@ export function upsertCards(appid, cards) {
             steam_market_buy_order_eur=COALESCE(@steam_market_buy_order_eur, steam_market_buy_order_eur),
             steam_market_buy_order_qty=COALESCE(@steam_market_buy_order_qty, steam_market_buy_order_qty),
             sce_quick_trade=@sce_quick_trade,
-            owner=COALESCE(@owner, owner)
+            owner=@owner
     `);
 
     const deleteStmt = db.prepare('DELETE FROM cards WHERE appid = ?');
