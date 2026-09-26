@@ -381,7 +381,7 @@ export function setGameProfileJSON(appid, fields) {
 
 // --- OWNER helpers (multi-compte) ---
 
-import { addOwner, removeOwner } from './utils.js';
+import { addOwner, removeOwner, getSteamProfilePaths } from './utils.js';
 
 /**
  * Ajoute un profile link a la liste d owners d un jeu (appid).
@@ -613,16 +613,137 @@ export function getIncompleteBadgeAppids() {
     `).all();
 }
 
+/**
+ * Migration unique: backfill les champs par profil pour les donnees existantes.
+ * Assigne les valeurs globales (fetched_at, lasttrade, badge_crafted, etc.)
+ * au profil principal. Reconstruit qty_by_profile a partir de inv_json.
+ * Suivie par la cle meta 'profileMigrationDone'.
+ */
+export function migrateProfileData() {
+    if (getMeta('profileMigrationDone', '0') === '1') return;
+
+    const primaryProfile = getSteamProfilePaths()[0] || 'my';
+    let gamesMigrated = 0;
+    let cardsMigrated = 0;
+
+    const tx = db.transaction(() => {
+        // 1. Backfill games: champs par profil depuis les colonnes globales
+        const games = db.prepare(
+            'SELECT appid, fetched_at, lasttrade, badge_crafted, badge_crafted_fetched_at, badge_crafted_owner,\n' +
+            '       fetched_at_by_profile, lasttrade_by_profile, badge_crafted_by_profile, badge_crafted_fetched_at_by_profile\n' +
+            'FROM games'
+        ).all();
+
+        for (const g of games) {
+            const updates = {};
+
+            // fetched_at_by_profile: vide -> assigner au profil principal
+            if (g.fetched_at) {
+                let data = {};
+                try { data = JSON.parse(g.fetched_at_by_profile || '{}'); } catch { /* ignore */ }
+                if (!data[primaryProfile]) {
+                    data[primaryProfile] = g.fetched_at;
+                    updates.fetched_at_by_profile = JSON.stringify(data);
+                }
+            }
+
+            // lasttrade_by_profile
+            if (g.lasttrade) {
+                let data = {};
+                try { data = JSON.parse(g.lasttrade_by_profile || '{}'); } catch { /* ignore */ }
+                if (!data[primaryProfile]) {
+                    data[primaryProfile] = g.lasttrade;
+                    updates.lasttrade_by_profile = JSON.stringify(data);
+                }
+            }
+
+            // badge_crafted_by_profile (0 ou 1, pas NULL)
+            if (g.badge_crafted !== null) {
+                let data = {};
+                try { data = JSON.parse(g.badge_crafted_by_profile || '{}'); } catch { /* ignore */ }
+                if (!Object.prototype.hasOwnProperty.call(data, primaryProfile)) {
+                    data[primaryProfile] = g.badge_crafted;
+                    updates.badge_crafted_by_profile = JSON.stringify(data);
+                }
+            }
+
+            // badge_crafted_fetched_at_by_profile
+            if (g.badge_crafted_fetched_at) {
+                let data = {};
+                try { data = JSON.parse(g.badge_crafted_fetched_at_by_profile || '{}'); } catch { /* ignore */ }
+                if (!data[primaryProfile]) {
+                    data[primaryProfile] = g.badge_crafted_fetched_at;
+                    updates.badge_crafted_fetched_at_by_profile = JSON.stringify(data);
+                }
+            }
+
+            // badge_crafted_owner: NULL alors que badge_crafted = 1
+            if (g.badge_crafted === 1 && !g.badge_crafted_owner) {
+                updates.badge_crafted_owner = primaryProfile;
+            }
+
+            if (Object.keys(updates).length > 0) {
+                const setClauses = Object.keys(updates).map(k => `${k} = ?`).join(', ');
+                const values = [...Object.values(updates), String(g.appid)];
+                db.prepare(`UPDATE games SET ${setClauses} WHERE appid = ?`).run(...values);
+                gamesMigrated++;
+            }
+        }
+
+        // 2. Backfill cards: ajouter profile aux items inv, reconstruire qty_by_profile
+        const cards = db.prepare('SELECT id, inv_json, qty_by_profile FROM cards').all();
+
+        for (const c of cards) {
+            let inv = [];
+            try { inv = JSON.parse(c.inv_json || '[]'); } catch { /* ignore */ }
+
+            let changed = false;
+
+            // Ajouter profile aux items qui n en ont pas
+            for (const item of inv) {
+                if (!item.profile) {
+                    item.profile = primaryProfile;
+                    changed = true;
+                }
+            }
+
+            // Reconstruire qty_by_profile si vide
+            let qtyByProfile = {};
+            try { qtyByProfile = JSON.parse(c.qty_by_profile || '{}'); } catch { /* ignore */ }
+            if (Object.keys(qtyByProfile).length === 0 && inv.length > 0) {
+                for (const item of inv) {
+                    const p = item.profile || primaryProfile;
+                    qtyByProfile[p] = (qtyByProfile[p] || 0) + 1;
+                }
+                changed = true;
+            }
+
+            if (changed) {
+                db.prepare('UPDATE cards SET inv_json = ?, qty_by_profile = ? WHERE id = ?')
+                    .run(JSON.stringify(inv), JSON.stringify(qtyByProfile), c.id);
+                cardsMigrated++;
+            }
+        }
+    });
+
+    tx();
+    setMeta('profileMigrationDone', '1');
+    console.log(`[DB] Migration multi-compte: ${gamesMigrated} jeu(x), ${cardsMigrated} carte(s) migre(s) vers le profil "${primaryProfile}".`);
+}
+
 export function purgeCache() {
     db.prepare('DELETE FROM games').run();
     db.prepare('DELETE FROM cards').run();
     db.prepare('DELETE FROM badge_appids').run();
     db.prepare('DELETE FROM meta').run();
     setMeta('scecredit', '0');
+    // La migration multi-compte devra etre refaites apres purge
+    setMeta('profileMigrationDone', '0');
     console.log('[DB] Cache purge.');
 }
 
 // Initialise automatiquement au chargement du module
 initDB();
+migrateProfileData();
 
 export default db;
