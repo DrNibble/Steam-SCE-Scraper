@@ -136,6 +136,9 @@ export function analyzeBadgeStatus(appid) {
     if (allProfiles.length > 0) {
         const missingByProfile = {};
         const completableTradeByProfile = {};
+        const completableSCEByProfile = {};
+        const completableSCEdoublonByProfile = {};
+        const completableSCEwobudgetByProfile = {};
         const totalCostSceByProfile = {};
         const hasExpensiveCardByProfile = {};
 
@@ -164,12 +167,18 @@ export function analyzeBadgeStatus(appid) {
             completableTradeByProfile[profile] = (profileOwnedQty >= setCardsTotal) ? 1 : 0;
             totalCostSceByProfile[profile] = profileTotalCostSCE;
 
+            // Indicateurs SCE par profil (meme logique que l agrege)
+            let profileSCE = (profileMissingCount > 0) && profileAllMissingAvailable && (profileTotalCostSCE <= currentCredit);
+            let profileSCEdoublon = (profileMissingCount > 0) && (totalAvailableFromBot >= profileMissingCount) && (profileTotalCostSCE <= currentCredit);
+            let profileSCEwobudget = (profileMissingCount > 0) && profileAllMissingAvailable;
+
             // Carte chere par profil: meme carte, mais isOwned depend du profil
+            let profileOwnsExpensive = false;
             if (expensiveInfo) {
                 const expensiveCard = expensiveCardHash
                     ? cards.find(c => c.hash === expensiveCardHash)
                     : null;
-                const profileOwnsExpensive = expensiveCard
+                profileOwnsExpensive = expensiveCard
                     ? ((expensiveCard.qtyByProfile?.[profile] || 0) > 0)
                     : false;
                 hasExpensiveCardByProfile[profile] = {
@@ -179,11 +188,26 @@ export function analyzeBadgeStatus(appid) {
             } else {
                 hasExpensiveCardByProfile[profile] = null;
             }
+
+            // Blocage par carte chere (meme logique que l agrege)
+            const profileIsTooExpensive = expensiveInfo && !profileOwnsExpensive;
+            if (profileIsTooExpensive) {
+                profileSCE = false;
+                profileSCEwobudget = false;
+                profileSCEdoublon = false;
+            }
+
+            completableSCEByProfile[profile] = profileSCE ? 1 : 0;
+            completableSCEdoublonByProfile[profile] = profileSCEdoublon ? 1 : 0;
+            completableSCEwobudgetByProfile[profile] = profileSCEwobudget ? 1 : 0;
         }
 
         setGameProfileJSON(appid, {
             missing_count_by_profile: missingByProfile,
             is_completable_via_trade_by_profile: completableTradeByProfile,
+            is_completable_via_sce_by_profile: completableSCEByProfile,
+            is_completable_via_sce_doublon_by_profile: completableSCEdoublonByProfile,
+            is_completable_via_sce_wobudget_by_profile: completableSCEwobudgetByProfile,
             total_cost_sce_by_profile: totalCostSceByProfile,
             has_expensive_card_by_profile: hasExpensiveCardByProfile,
         });

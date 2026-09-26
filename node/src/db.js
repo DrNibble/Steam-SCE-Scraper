@@ -85,6 +85,9 @@ CREATE TABLE IF NOT EXISTS games (
     badge_crafted_fetched_at_by_profile TEXT,       -- JSON: { "my": ts } date du check badge par profil
     missing_count_by_profile       TEXT,             -- JSON: { "my": 3, "profiles/123": 5 } cartes manquantes par profil
     is_completable_via_trade_by_profile TEXT,       -- JSON: { "my": 1, "profiles/123": 0 } completitude via trade par profil
+    is_completable_via_sce_by_profile  TEXT,        -- JSON: { "my": 1, "profiles/123": 0 } completitude via SCE par profil
+    is_completable_via_sce_doublon_by_profile TEXT, -- JSON: { "my": 1, "profiles/123": 0 } completitude via SCE doublon par profil
+    is_completable_via_sce_wobudget_by_profile TEXT,-- JSON: { "my": 1, "profiles/123": 0 } completitude via SCE sans budget par profil
     total_cost_sce_by_profile      TEXT,             -- JSON: { "my": 100, "profiles/123": 200 } cout SCE par profil
     has_expensive_card_by_profile  TEXT,             -- JSON: { "my": {...}, "profiles/123": null } carte chere par profil
     owner                          TEXT              -- liste des profile links possedant ce jeu (separes par des virgules)
@@ -148,6 +151,9 @@ export function initDB() {
         'ALTER TABLE games ADD COLUMN badge_crafted_fetched_at_by_profile TEXT',
         'ALTER TABLE games ADD COLUMN missing_count_by_profile TEXT',
         'ALTER TABLE games ADD COLUMN is_completable_via_trade_by_profile TEXT',
+        'ALTER TABLE games ADD COLUMN is_completable_via_sce_by_profile TEXT',
+        'ALTER TABLE games ADD COLUMN is_completable_via_sce_doublon_by_profile TEXT',
+        'ALTER TABLE games ADD COLUMN is_completable_via_sce_wobudget_by_profile TEXT',
         'ALTER TABLE games ADD COLUMN total_cost_sce_by_profile TEXT',
         'ALTER TABLE games ADD COLUMN has_expensive_card_by_profile TEXT',
         // Lien de trade rapide SCE (href du bouton btn-primary sur la page inventory)
@@ -323,6 +329,9 @@ const VALID_PROFILE_COLUMNS = new Set([
     'badge_crafted_fetched_at_by_profile',
     'missing_count_by_profile',
     'is_completable_via_trade_by_profile',
+    'is_completable_via_sce_by_profile',
+    'is_completable_via_sce_doublon_by_profile',
+    'is_completable_via_sce_wobudget_by_profile',
     'total_cost_sce_by_profile',
     'has_expensive_card_by_profile',
 ]);
