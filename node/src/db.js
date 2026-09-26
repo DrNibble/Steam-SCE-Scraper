@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS games (
     missing_count                  INTEGER DEFAULT 0,
     badge_crafted                  INTEGER,         -- NULL = pas encore verifie, 0 = pas de badge, 1 = badge deja genere
     badge_crafted_fetched_at       INTEGER,          -- date du dernier check gamecards (cache anti rate-limit)
+    badge_crafted_owner            TEXT,             -- profile link du compte qui a crafte le badge (multi-compte)
     owner                          TEXT              -- liste des profile links possedant ce jeu (separes par des virgules)
 );
 
@@ -130,6 +131,8 @@ export function initDB() {
         'ALTER TABLE games ADD COLUMN badge_crafted INTEGER',
         // Date du dernier check badge_crafted (cache anti rate-limit steam.js)
         'ALTER TABLE games ADD COLUMN badge_crafted_fetched_at INTEGER',
+        // Multi-compte: profile link du compte qui a crafte le badge
+        'ALTER TABLE games ADD COLUMN badge_crafted_owner TEXT',
         // Lien de trade rapide SCE (href du bouton btn-primary sur la page inventory)
         'ALTER TABLE cards ADD COLUMN sce_quick_trade TEXT',
         // Sell/buy order columns (deja dans CREATE TABLE mais absentes des anciennes bases)
@@ -236,15 +239,17 @@ export function getGamesWithCards() {
 
 /**
  * Met a jour le statut "badge deja genere" d un jeu + la date du check
+ * + le profile link du compte qui a crafte le badge (multi-compte).
  * (badge_crafted_fetched_at sert de cache anti rate-limit pour
  * fetchBadgeCrafted : un badge_crafted = 1 n est pas re-checke par les
  * scans automatiques, seulement via force)
  * @param {string} appid
  * @param {boolean} crafted - true si le badge a ete crafte par le profil
+ * @param {string|null} [owner] - profile link du compte qui a crafte le badge
  */
-export function setGameBadgeCrafted(appid, crafted) {
-    db.prepare('UPDATE games SET badge_crafted = ?, badge_crafted_fetched_at = ? WHERE appid = ?')
-        .run(crafted ? 1 : 0, Date.now(), String(appid));
+export function setGameBadgeCrafted(appid, crafted, owner = null) {
+    db.prepare('UPDATE games SET badge_crafted = ?, badge_crafted_fetched_at = ?, badge_crafted_owner = ? WHERE appid = ?')
+        .run(crafted ? 1 : 0, Date.now(), owner, String(appid));
 }
 
 // --- OWNER helpers (multi-compte) ---

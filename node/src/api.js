@@ -51,6 +51,7 @@ function gameRowToApi(row) {
         missingCount: row.missing_count,
         badgeCrafted: row.badge_crafted ?? null,
         badgeCraftedFetchedAt: row.badge_crafted_fetched_at ?? null,
+        badgeCraftedOwner: row.badge_crafted_owner ?? null,
         owner: row.owner || '',
     };
 }

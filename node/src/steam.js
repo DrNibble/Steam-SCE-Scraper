@@ -424,7 +424,7 @@ export async function fetchBadgeCrafted(appid, profileLink = null, options = {})
         else if (html.includes('badge_empty_circle')) result = false;
 
         // Seuls les resultats deterministes sont caches en DB (jamais les erreurs)
-        if (result !== null) setGameBadgeCrafted(appid, result);
+        if (result !== null) setGameBadgeCrafted(appid, result, pl);
         return result;
     } catch (e) {
         //ES_log(`[fetchBadgeCrafted] Erreur pour ${appid}: ${e.message}`);
