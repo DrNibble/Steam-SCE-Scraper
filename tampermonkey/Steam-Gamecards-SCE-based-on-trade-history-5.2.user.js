@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam-Gamecards-SCE based on API
 // @namespace    http://tampermonkey.net/
-// @version      0.7
+// @version      0.8
 // @description  Scrap complet Steam & SCE avec cache persistant, workers et API REST
 // @author       DrNibble
 // @match        https://steamcommunity.com/profiles/*/badges*
@@ -1618,6 +1618,8 @@ ES_log("[getPageAppids] Entrée fonction");
                 <span id="es-status-queue">--</span>
                 <span style="color: #57cbde; font-weight: bold; margin-left: 10px;">Wait Time : </span>
                 <span id="es-status-waittime">--</span>
+                <br>
+                <span id="es-status-botoffline" style="color: #ff4444; font-weight: bold;"></span>
             `;
                         xpBlock.appendChild(statusContainer);
                     }
@@ -1638,6 +1640,12 @@ ES_log("[getPageAppids] Entrée fonction");
                     if (waitEl) {
                         const wait = win.ES.DATA.sceWaitTime !== undefined ? `${win.ES.DATA.sceWaitTime} min` : '--';
                         waitEl.innerHTML = `<span style="color:#fff">${wait}</span>`;
+                    }
+                    const botOfflineEl = document.getElementById('es-status-botoffline');
+                    if (botOfflineEl) {
+                        botOfflineEl.innerHTML = win.ES._sceBotOffline
+                            ? '⚠ Trading Bot OFFLINE'
+                            : '';
                     }
                 };
 
@@ -1712,6 +1720,8 @@ ES_log("[getPageAppids] Entrée fonction");
             <span id="es-status-queue">--</span>
             <span style="color: #57cbde; font-weight: bold; margin-left: 10px;">Wait Time : </span>
             <span id="es-status-waittime">--</span>
+            <br>
+            <span id="es-status-botoffline" style="color: #ff4444; font-weight: bold;"></span>
         `;
                 xpBlock.appendChild(statusContainer);
             }
@@ -1731,6 +1741,12 @@ ES_log("[getPageAppids] Entrée fonction");
                 if (waitEl) {
                     const wait = win.ES.DATA.sceWaitTime !== undefined ? `${win.ES.DATA.sceWaitTime} min` : '--';
                     waitEl.innerHTML = `<span style="color:#fff">${wait}</span>`;
+                }
+                const botOfflineEl = document.getElementById('es-status-botoffline');
+                if (botOfflineEl) {
+                    botOfflineEl.innerHTML = win.ES._sceBotOffline
+                        ? '⚠ Trading Bot OFFLINE'
+                        : '';
                 }
             };
 
