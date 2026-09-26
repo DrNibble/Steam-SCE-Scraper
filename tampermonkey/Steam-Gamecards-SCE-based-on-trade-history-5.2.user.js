@@ -1564,6 +1564,11 @@ ES_log("[getPageAppids] Entrée fonction");
                     // On a deja les donnees via fetchAPIData, mais on peut rafraichir ce jeu precis
                     // win.ES.fetchAPIGame(appId); // optionnel: refresh ciblé
 
+                    // Recalculer l'analyse cote client avec les donnees API + SCE fraiches
+                    if (win.ES.analyzeBadgeStatus) {
+                        win.ES.analyzeBadgeStatus(appId);
+                    }
+
                     if (win.ES.injectQuickTradeButtons) {
                         setTimeout(() => {
                             win.ES.injectQuickTradeButtons(appId);
@@ -1620,9 +1625,10 @@ ES_log("[getPageAppids] Entrée fonction");
                 updateStatus("✅ Données chargées depuis l'API");
 
                 // Mise a jour de l'UI pour chaque badge visible
-                // En mode API, les donnees viennent du backend (source de verite):
-                // on ne recalcule pas analyzeBadgeStatus (qui pourrait ecraser les champs DB)
+                // Recalculer analyzeBadgeStatus cote client pour refléter les
+                // donnees SCE fraiches (fetchSCEFresh peut avoir enrichi les cartes)
                 appidsOnPage.forEach(id => {
+                    if (win.ES.analyzeBadgeStatus) win.ES.analyzeBadgeStatus(id);
                     win.ES.updateBadgeUI(id);
                 });
 
