@@ -7,6 +7,7 @@ import { getSCECookieViaSteamOpenID } from './auth.js';
 let _sceCookieStr = getMeta('sceCookie', '') || SCE_COOKIE || '';
 let creditFetched = false;
 let _sceRetryDone = false;
+let _sceBotOffline = false;
 let _globalInfoPromise = null;
 let _globalInfoInterval = null;
 const GLOBAL_INFO_REFRESH_MS = 10 * 60 * 1000; // 10 minutes
@@ -169,6 +170,18 @@ async function _fetchSCEGlobalInfoInner() {
                 return;
             }
         }
+
+        // Detection: le bot SCE est hors ligne
+        if (profileHtml.includes('Trading Bot is currently offline')) {
+            console.warn('[SCE] Le bot SCE est actuellement hors ligne.');
+            _sceBotOffline = true;
+            setMeta('scecredit', '0');
+            setMeta('scePendingOffers', '0');
+            setMeta('sceWaitTime', '0');
+            creditFetched = true;
+            return;
+        }
+        _sceBotOffline = false;
 
         if (getSCECookie()) {
            // ES_log(`[fetchSCEGlobalInfo] Cookie SCE present (${getSCECookie().substring(0, 30)}...)`);
@@ -415,6 +428,14 @@ export async function getUSDtoEUR() {
 }
 
 /**
+ * Indique si le bot SCE est hors ligne (message "Trading Bot is currently offline"
+ * detecte sur la page profile lors du dernier fetchSCEGlobalInfo).
+ */
+export function isSCEBotOffline() {
+    return _sceBotOffline;
+}
+
+/**
  * Indique si la file d'attente du bot SCE est saturee:
  * waitTime > 1 minute ET plus de 10 offres en attente.
  * (Metas 'sceWaitTime' / 'scePendingOffers' peuplees par fetchSCEGlobalInfo)
@@ -491,6 +512,12 @@ export async function fetchSCEFresh(appid) {
 
     // Recupere les infos globales (credit, pending offers)
     await fetchSCEGlobalInfo();
+
+    // Bot SCE hors ligne : on annule le fetch
+    if (isSCEBotOffline()) {
+        ES_log(`[fetchSCEFresh] Bot SCE hors ligne - fetch annule pour ${appid}.`);
+        return null;
+    }
 
     // File d'attente SCE saturee (waitTime > 1 min et plus de 10 offres en
     // attente): on ne scrape pas maintenant, l'appid sera retente au prochain

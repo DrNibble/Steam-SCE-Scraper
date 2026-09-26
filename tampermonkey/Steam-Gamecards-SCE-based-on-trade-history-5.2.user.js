@@ -183,6 +183,7 @@
 
     // --- FETCH SCE GLOBAL INFO (credit, pending offers, wait time) ---
     win.ES._creditFetched = false;
+    win.ES._sceBotOffline = false;
     win.ES.fetchSCEGlobalInfo = async function() {
         if (win.ES._creditFetched) return;
 
@@ -199,6 +200,18 @@
                 win.ES._creditFetched = true;
                 return;
             }
+
+            // Detection: le bot SCE est hors ligne
+            if (profileHtml.includes('Trading Bot is currently offline')) {
+                console.warn("[SCE] Le bot SCE est actuellement hors ligne. Fetch SCE annulé.");
+                win.ES._sceBotOffline = true;
+                win.ES.DATA.scecredit = 0;
+                win.ES.DATA.scePendingOffers = 0;
+                win.ES.DATA.sceWaitTime = 0;
+                win.ES._creditFetched = true;
+                return;
+            }
+            win.ES._sceBotOffline = false;
 
             const doc = new DOMParser().parseFromString(profileHtml, "text/html");
 
@@ -370,6 +383,12 @@
 
         // 1. Infos globales (credit, pending offers)
         await win.ES.fetchSCEGlobalInfo();
+
+        // Bot SCE hors ligne : on annule le fetch
+        if (win.ES._sceBotOffline) {
+            ES_log(`[fetchSCEFresh] Bot SCE hors ligne — fetch annulé pour ${appid}.`);
+            return null;
+        }
 
         // 2. Game page (prix USD + check trade-in disabled)
         const gamePageResult = await win.ES.fetchSCEGamePage(appid);
