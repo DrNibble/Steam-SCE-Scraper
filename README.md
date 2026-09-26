@@ -56,7 +56,10 @@ Editez le fichier `.env` et renseignez vos cookies de session :
   - DevTools > Application > Cookies > steamcommunity.com
 - **SCE_COOKIE** : Cookie de session SCE (format header complet, ex: `PHPSESSID=...; cookie_consent=1`)
   - DevTools > Application > Cookies > steamcardexchange.net
-- **STEAM_PROFILE_PATH** : Chemin du profil Steam (`my`, `profiles/<SteamID64>`, ou `id/<vanity>`)
+- **STEAM_PROFILE_PATHS** : Liste de profile links Steam séparés par des virgules (`my`, `profiles/<SteamID64>`, ou `id/<vanity>`). Le premier est le profil principal (auth, trade offers). Tous les profils sont scannés pour les badges et l'inventaire. Chaque appid et carte reçoit un champ `owner` listant les profils qui les possèdent.
+  - Exemple : `STEAM_PROFILE_PATHS=my,profiles/76561198028880269,id/Dr_Nibble`
+  - Multi-compte : voir [Support multi-comptes](#support-multi-comptes)
+- **STEAM_PROFILE_PATH** : (obsolète) Chemin d'un seul profil Steam. Utilisez `STEAM_PROFILE_PATHS` pour le multi-compte.
 - **SCE_USD_TO_EUR** (optionnel) : Taux de change USD->EUR fixe pour la conversion des prix de la gamepage SCE (par defaut : taux BCE via frankfurter.app, mis en cache 24h, fallback 0.92)
 - **EVENT_APP_IDS** : AppIDs des evenements Steam (Sales, Awards, etc.), separes par des virgules (ex: `335590,866860,1797760`). Utilises par `isSteamEvent()` pour classer les badges d'evenements. A completer au fil des nouveaux evenements Steam.
 
@@ -172,6 +175,8 @@ La fonction `initDB()` de `db.js` exécute automatiquement des migrations `ALTER
 | `steam_market_sell_qty INTEGER` | cards | Volume de vente total |
 | `steam_market_buy_order_eur REAL` | cards | Demande d'achat la plus haute (EUR) |
 | `steam_market_buy_order_qty INTEGER` | cards | Nombre de demandes d'achat |
+| `owner TEXT` | games | Profils qui possèdent ce jeu (séparés par virgules) |
+| `owner TEXT` | cards | Profils qui possèdent cette carte (séparés par virgules) |
 
 ## Limite 24h des prix marche
 
@@ -495,6 +500,7 @@ L'endpoint `/api/data` retourne un objet JSON plat compatible avec le script Tam
     "isCompletableViaSCE": true,
     "totalCostSCE": 3,
     "missingCount": 2,
+    "owner": "my,profiles/76561198028880269",
     "cards": [
       {
         "name": "Card Name",
@@ -508,7 +514,8 @@ L'endpoint `/api/data` retourne un objet JSON plat compatible avec le script Tam
         "steamMarketPriceEur": 0.06,
         "steamMarketLastSalePriceEur": 0.06,
         "steamMarketSales7d": 17,
-        "steamMarketFetchedAt": 1790249510124
+        "steamMarketFetchedAt": 1790249510124,
+        "owner": "my,profiles/76561198028880269"
       }
     ]
   }
@@ -518,6 +525,55 @@ L'endpoint `/api/data` retourne un objet JSON plat compatible avec le script Tam
 ### Securite
 
 Le serveur est bind sur `127.0.0.1` par defaut : les donnees ne sont pas exposees sur le reseau. Les en-tetes CORS (`Access-Control-Allow-Origin: *`) permettent au script Tampermonkey de faire des requetes depuis les pages Steam.
+
+## Support multi-comptes
+
+Le scraper supporte la gestion de **plusieurs comptes Steam** en parallèle. Chaque profil défini dans `STEAM_PROFILE_PATHS` est scanné pour ses badges et son inventaire.
+
+### Configuration
+
+Dans `.env`, renseignez la variable `STEAM_PROFILE_PATHS` avec les profile links séparés par des virgules :
+
+```bash
+# Exemple : 3 comptes Steam
+STEAM_PROFILE_PATHS=my,profiles/76561198028880269,id/Dr_Nibble
+```
+
+- Le **premier profil** est le profil principal : il est utilisé pour l'authentification, les trade offers et les commandes manuelles.
+- **Tous les profils** sont scannés pour les badges (pages `/badges`) et l'inventaire (contexte 753_6).
+- L'authentification Steam (`STEAM_COOKIE`) doit correspondre au premier profil.
+
+### Champ `owner`
+
+Chaque appid (jeu) et chaque carte reçoit un champ `owner` en DB (colonnes `games.owner` et `cards.owner`) qui liste les profils possédant l'élément, séparés par des virgules :
+
+```
+appid.owner = "my,profiles/76561198028880269"
+cards.name.owner = "my,profiles/76561198028880269"
+```
+
+- **Pour les jeux** : `owner` est rempli lors du scan des badges (`parseBadgePage`). Si un profil a un badge pour un appid, son profile link est ajouté.
+- **Pour les cartes** : `owner` est rempli lors du scan de l'inventaire (`fillInventoryData`). Si un profil a l'item dans son inventaire, son profile link est ajouté.
+- Les owners sont **accumulés sans doublons** via la fonction `addOwner()` (voir `utils.js`).
+- L'API REST expose `owner` dans les endpoints `/api/games`, `/api/games/:appid` et `/api/data`.
+
+### Accumulation de l'inventaire
+
+L'inventaire des cartes est **accumulé** à travers les profils : chaque item dans `card.inv` porte un champ `profile` identifiant son propriétaire. La quantité (`qty`) reflète le total tous profils confondus.
+
+Lors d'un re-scan d'un profil, les items de ce profil sont d'abord retirés (pour éviter les doublons) puis ré-ajoutés avec les données fraîches.
+
+### Comportement multi-profils
+
+| Fonctionnalité | Comportement |
+|---------------|-------------|
+| Scan des badges (`syncBadgesWorkflow`) | Scanne toutes les pages de badges de chaque profil, déduplique les appids |
+| `processQueue` | Appelle `fetchSteamData` pour chaque profil (accumule `inv` + `owner`) |
+| Trade history (`syncSteamInventoryHistory`) | Synchronise pour chaque profil |
+| Re-scan après trade | Re-fetch Steam pour chaque profil (`force: true`) |
+| Daemon (4 tâches parallèles) | Task 3 itère sur tous les profils pour la trade history |
+| SCE (`fetchSCEFresh`) | Profil-agnostique, appelé une seule fois par appid |
+| Prix marché (`fetchMarketPricesV2`) | Profil-agnostique, appelé une seule fois par appid |
 
 ## Workflow
 
