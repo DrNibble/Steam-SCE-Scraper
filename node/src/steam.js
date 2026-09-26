@@ -1,6 +1,6 @@
 import * as cheerio from 'cheerio';
 import { httpGet, httpGetJSON, clean, isSteamEvent, sleep, parseSteamDateToMs, getSteamCookie, getSteamProfilePath, getSteamProfilePaths, extractSessionIdFromCookies, INVENTORY_PAGE_DELAY, ES_log } from './utils.js';
-import { upsertBadgeAppid, upsertGame, upsertCards, getMeta, setMeta, getGame, getBadgeAppid, getCards, updateCardMarketPrices, setGameBadgeCrafted, addOwnerToGame, addOwnerToCard, removeOwnerFromGame, getGamesWithOwner } from './db.js';
+import { upsertBadgeAppid, upsertGame, upsertCards, getMeta, setMeta, getGame, getBadgeAppid, getCards, updateCardMarketPrices, setGameBadgeCrafted, addOwnerToGame, removeOwnerFromGame, getGamesWithOwner } from './db.js';
 
 // Cookie Steam dynamique (recupere via auth.js ou .env)
 function steamCookie() { return getSteamCookie(); }
@@ -327,13 +327,11 @@ export async function fillInventoryData(cards, profileLink = null) {
         // Mise a jour de qty (total toutes profils confondus)
         cards.forEach(c => { c.qty = c.inv.length; });
 
-        // Rebuild owner + qty_by_profile: reflet exact de l'inventaire.
-        // owner = liste des profils qui ont au moins 1 item dans inv
+        // Rebuild qty_by_profile: reflet exact de l'inventaire.
         // qty_by_profile = { "profilelink1": 3, "profilelink2": 0 }
         const allProfiles = getSteamProfilePaths();
         cards.forEach(card => {
             if (!card.hash) return;
-            // Compte par profil depuis inv
             const qtyByProfile = {};
             // Initialise tous les profils configures a 0
             for (const p of allProfiles) {
@@ -346,9 +344,6 @@ export async function fillInventoryData(cards, profileLink = null) {
                 }
             }
             card.qtyByProfile = qtyByProfile;
-            // owner = profils avec au moins 1 item
-            const profiles = Object.entries(qtyByProfile).filter(([, q]) => q > 0).map(([p]) => p);
-            card.owner = profiles.join(',');
         });
 
         const ownedCount = cards.reduce((acc, c) => acc + c.inv.length, 0);
@@ -480,7 +475,6 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
                 hash: c.hash,
                 iconUrl: c.icon_url,
                 artUrl: c.art_url,
-                owner: c.owner || '',
                 qtyByProfile: c.qty_by_profile ? JSON.parse(c.qty_by_profile) : {},
                 'sce stock': c.sce_stock,
                 'sce worth': c.sce_worth,
@@ -531,7 +525,6 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
                 hash: card.markethash,
                 iconUrl: card.imgurl,
                 artUrl: card.arturl,
-                owner: existing?.owner || '',
                 qtyByProfile: existing?.qty_by_profile ? JSON.parse(existing.qty_by_profile) : {},
                 'sce stock': existing?.sce_stock || 0,
                 'sce worth': existing?.sce_worth || 0,

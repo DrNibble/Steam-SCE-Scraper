@@ -104,7 +104,6 @@ CREATE TABLE IF NOT EXISTS cards (
     steam_market_buy_order_eur REAL,
     steam_market_buy_order_qty INTEGER,
     sce_quick_trade            TEXT,             -- lien de trade rapide SCE (href du bouton btn-primary)
-    owner                      TEXT,             -- liste des profile links possedant cette carte (separes par des virgules)
     qty_by_profile             TEXT,             -- JSON: { "profilelink1": 3, "profilelink2": 0 }
     UNIQUE(appid, hash),
     FOREIGN KEY(appid) REFERENCES games(appid) ON DELETE CASCADE
@@ -138,9 +137,8 @@ export function initDB() {
         'ALTER TABLE cards ADD COLUMN steam_market_sell_qty INTEGER',
         'ALTER TABLE cards ADD COLUMN steam_market_buy_order_eur REAL',
         'ALTER TABLE cards ADD COLUMN steam_market_buy_order_qty INTEGER',
-        // Multi-compte: colonne owner pour tracker quels profils possedent chaque jeu/carte
+        // Multi-compte: colonne owner pour tracker quels profils possedent chaque jeu
         'ALTER TABLE games ADD COLUMN owner TEXT',
-        'ALTER TABLE cards ADD COLUMN owner TEXT',
         'ALTER TABLE cards ADD COLUMN qty_by_profile TEXT',
     ];
     for (const sql of migrations) {
@@ -267,19 +265,6 @@ export function addOwnerToGame(appid, owner) {
 }
 
 /**
- * Ajoute un profile link a la liste d owners d une carte.
- * @param {string} appid
- * @param {string} hash - market_hash_name de la carte
- * @param {string} owner - profile link a ajouter
- */
-export function addOwnerToCard(appid, hash, owner) {
-    const row = db.prepare('SELECT owner FROM cards WHERE appid = ? AND hash = ?').get(String(appid), hash);
-    if (!row) return;
-    const newOwner = addOwner(row.owner, owner);
-    db.prepare('UPDATE cards SET owner = ? WHERE appid = ? AND hash = ?').run(newOwner, String(appid), hash);
-}
-
-/**
  * Retire un profile link de la liste d owners d un jeu.
  * @param {string} appid
  * @param {string} owner - profile link a retirer
@@ -306,7 +291,7 @@ export function upsertCards(appid, cards) {
     // Avant de supprimer/reinserer, on sauvegarde les prix marche Steam existants
     // et l owner (multi-compte) pour ne pas les perdre
     const existingData = {};
-    const existingRows = db.prepare('SELECT hash, steam_market_price_eur, steam_market_last_sale_price_eur, steam_market_sales_7d, steam_market_fetched_at, steam_market_sell_price_eur, steam_market_sell_qty, steam_market_buy_order_eur, steam_market_buy_order_qty, owner, qty_by_profile FROM cards WHERE appid = ?').all(String(appid));
+    const existingRows = db.prepare('SELECT hash, steam_market_price_eur, steam_market_last_sale_price_eur, steam_market_sales_7d, steam_market_fetched_at, steam_market_sell_price_eur, steam_market_sell_qty, steam_market_buy_order_eur, steam_market_buy_order_qty, qty_by_profile FROM cards WHERE appid = ?').all(String(appid));
     for (const row of existingRows) {
         if (row.hash) {
             existingData[row.hash] = {
@@ -318,7 +303,6 @@ export function upsertCards(appid, cards) {
                 sellQty: row.steam_market_sell_qty,
                 buyOrderEur: row.steam_market_buy_order_eur,
                 buyOrderQty: row.steam_market_buy_order_qty,
-                owner: row.owner,
                 qtyByProfile: row.qty_by_profile,
             };
         }
@@ -329,12 +313,12 @@ export function upsertCards(appid, cards) {
             sce_stock, sce_worth, sce_price, sce_market_price_usd,
             steam_market_price_eur, steam_market_last_sale_price_eur, steam_market_sales_7d, steam_market_fetched_at,
             steam_market_sell_price_eur, steam_market_sell_qty, steam_market_buy_order_eur, steam_market_buy_order_qty,
-            sce_quick_trade, owner, qty_by_profile)
+            sce_quick_trade, qty_by_profile)
         VALUES (@appid, @name, @card_index, @qty, @hash, @icon_url, @art_url, @inv_json,
             @sce_stock, @sce_worth, @sce_price, @sce_market_price_usd,
             @steam_market_price_eur, @steam_market_last_sale_price_eur, @steam_market_sales_7d, @steam_market_fetched_at,
             @steam_market_sell_price_eur, @steam_market_sell_qty, @steam_market_buy_order_eur, @steam_market_buy_order_qty,
-            @sce_quick_trade, @owner, @qty_by_profile)
+            @sce_quick_trade, @qty_by_profile)
         ON CONFLICT(appid, hash) DO UPDATE SET
             name=@name, card_index=@card_index, qty=@qty, icon_url=@icon_url, art_url=@art_url,
             inv_json=@inv_json, sce_stock=@sce_stock, sce_worth=@sce_worth, sce_price=@sce_price,
@@ -348,7 +332,6 @@ export function upsertCards(appid, cards) {
             steam_market_buy_order_eur=COALESCE(@steam_market_buy_order_eur, steam_market_buy_order_eur),
             steam_market_buy_order_qty=COALESCE(@steam_market_buy_order_qty, steam_market_buy_order_qty),
             sce_quick_trade=@sce_quick_trade,
-            owner=@owner,
             qty_by_profile=@qty_by_profile
     `);
 
@@ -392,7 +375,6 @@ export function upsertCards(appid, cards) {
                 steam_market_buy_order_eur: cardBuyOrderEur ?? existing?.buyOrderEur ?? null,
                 steam_market_buy_order_qty: cardBuyOrderQty ?? existing?.buyOrderQty ?? null,
                 sce_quick_trade: card['sce quick-trade'] || null,
-                owner: card.owner ?? existing?.owner ?? null,
                 qty_by_profile: card.qtyByProfile ? JSON.stringify(card.qtyByProfile) : (existing?.qtyByProfile ?? null),
             });
         }

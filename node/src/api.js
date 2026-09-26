@@ -84,8 +84,10 @@ function cardRowToApi(row) {
         steamMarketSellQty: row.steam_market_sell_qty ?? null,
         steamMarketBuyOrderEur: row.steam_market_buy_order_eur ?? null,
         steamMarketBuyOrderQty: row.steam_market_buy_order_qty ?? null,
-        owner: row.owner || '',
         qtyByProfile: row.qty_by_profile ? JSON.parse(row.qty_by_profile) : {},
+        get owner() {
+            return Object.entries(this.qtyByProfile).filter(([, q]) => q > 0).map(([p]) => p).join(',');
+        },
     };
 }
 

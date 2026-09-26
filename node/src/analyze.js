@@ -24,7 +24,6 @@ export function analyzeBadgeStatus(appid) {
         index: c.card_index,
         inv: JSON.parse(c.inv_json || '[]'),
         hash: c.hash,
-        owner: c.owner || '',
         qtyByProfile: c.qty_by_profile ? JSON.parse(c.qty_by_profile) : {},
         'sce stock': c.sce_stock,
         'sce worth': c.sce_worth,
