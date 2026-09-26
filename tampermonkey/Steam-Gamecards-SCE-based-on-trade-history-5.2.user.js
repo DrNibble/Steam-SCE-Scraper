@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Steam-Gamecards-SCE based on API
 // @namespace    http://tampermonkey.net/
-// @version      0.9
+// @version      0.8
 // @description  Scrap complet Steam & SCE avec cache persistant, workers et API REST
 // @author       DrNibble
 // @match        https://steamcommunity.com/profiles/*/badges*
@@ -770,10 +770,6 @@ ES_log("[getPageAppids] Entrée fonction");
         statusContainer.innerHTML = ''; // Reset
 
         win.ES.renderStatusLabels(appId, statusContainer);
-
-        // Rapport SCE par profil (multi-compte)
-        win.ES.renderProfileReport(appId, statusContainer);
-
         ES_log(`[renderGamecardStatus] Labels rendus pour ${appId}`);
     };
 
@@ -793,96 +789,6 @@ ES_log("[getPageAppids] Entrée fonction");
         container.appendChild(div);
         return div; // On retourne l'élément pour pouvoir y ajouter des events (onclick)
     }
-
-    // --- RAPPORT SCE PAR PROFIL (multi-compte) ---
-    // Affiche un resume par profil sous les labels de statut existants.
-    // Lit les champs *ByProfile depuis win.ES.DATA (fournis par l'API).
-    win.ES.renderProfileReport = function(appid, statusContainer) {
-        const data = win.ES.DATA[appid];
-        if (!data || typeof data === 'undefined') return;
-
-        // Detection des profils depuis les champs par profil
-        const profiles = new Set();
-        const profileFields = [
-            'missingCountByProfile',
-            'isCompletableViaTradeByProfile',
-            'isCompletableViaSCEByProfile',
-            'isCompletableViaSCEdoublonByProfile',
-            'isCompletableViaSCEwobudgetByProfile',
-            'totalCostSceByProfile',
-            'badgeCraftedByProfile',
-        ];
-        for (const field of profileFields) {
-            if (data[field] && typeof data[field] === 'object') {
-                for (const p of Object.keys(data[field])) profiles.add(p);
-            }
-        }
-        // Aussi depuis qtyByProfile des cartes
-        if (data.cards) {
-            for (const card of data.cards) {
-                if (card.qtyByProfile && typeof card.qtyByProfile === 'object') {
-                    for (const p of Object.keys(card.qtyByProfile)) profiles.add(p);
-                }
-            }
-        }
-
-        if (profiles.size === 0) return; // Pas de donnees par profil
-
-        // En-tete du rapport
-        const header = createStatusLabel(statusContainer, '#8b8b8b', '--- Rapport par profil ---');
-        header.style.fontSize = '10px';
-        header.style.marginTop = '6px';
-
-        const setCardsTotal = parseInt(data.setCards, 10) || 0;
-
-        for (const profile of profiles) {
-            // Calcul des cartes possedees par ce profil
-            let profileOwnedQty = 0;
-            if (data.cards) {
-                for (const card of data.cards) {
-                    profileOwnedQty += (card.qtyByProfile?.[profile] || 0);
-                }
-            }
-
-            const missing = data.missingCountByProfile?.[profile] ?? 0;
-            const cost = data.totalCostSceByProfile?.[profile] ?? 0;
-            const canTrade = data.isCompletableViaTradeByProfile?.[profile] === 1;
-            const canSCE = data.isCompletableViaSCEByProfile?.[profile] === 1;
-            const canDoublon = data.isCompletableViaSCEdoublonByProfile?.[profile] === 1;
-            const canWoBudget = data.isCompletableViaSCEwobudgetByProfile?.[profile] === 1;
-            const crafted = data.badgeCraftedByProfile?.[profile];
-
-            // Icone et couleur selon le statut global du profil
-            let icon = '\u{1F464}'; // 👤
-            let color = '#66c0f4';
-            if (crafted === 1) { icon = '\u2705'; color = '#a3d200'; }
-            else if (canTrade) { icon = '\u2714'; color = '#a3d200'; }
-            else if (canSCE) { icon = '\u{1F539}'; color = '#66c0f4'; }
-            else if (canDoublon) { icon = '\u267B'; color = '#a55eea'; }
-            else if (canWoBudget) { icon = '\u2139'; color = '#95a5a6'; }
-
-            // Format court du profil (ex: "my" reste "my", "profiles/123" -> "123")
-            let profileShort = profile;
-            const m = profile.match(/profiles\/(\d+)/);
-            if (m) profileShort = m[1];
-            else if (profile.match(/^id\//)) profileShort = profile.replace('id/', '@');
-
-            // Indicateurs SCE compacts
-            const sceStr = canSCE ? '\u2714' : '\u2718';
-            const doublonStr = canDoublon ? '\u2714' : '\u2718';
-            const woBudgetStr = canWoBudget ? '\u2714' : '\u2718';
-
-            let text = icon + ' ' + profileShort + ': ' + profileOwnedQty + '/' + setCardsTotal + ' cartes';
-            if (missing > 0) text += ', ' + missing + ' manq., ' + cost + 'c';
-            if (setCardsTotal > 0 && profileOwnedQty < setCardsTotal) {
-                text += ' | SCE:' + sceStr + ' Doublon:' + doublonStr + ' WoB:' + woBudgetStr;
-            }
-            if (crafted === 1) text += ' (badge crafte)';
-
-            const label = createStatusLabel(statusContainer, color, text);
-            label.style.fontSize = '10px';
-        }
-    };
 
     /**
      * Formate les infos marché pour l'affichage.
