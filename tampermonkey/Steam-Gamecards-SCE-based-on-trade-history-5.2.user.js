@@ -1644,7 +1644,7 @@ ES_log("[getPageAppids] Entrée fonction");
                     const botOfflineEl = document.getElementById('es-status-botoffline');
                     if (botOfflineEl) {
                         botOfflineEl.innerHTML = win.ES._sceBotOffline
-                            ? '⚠ Trading Bot OFFLINE'
+                            ? '⚠ Trading SCE Bot OFFLINE'
                             : '';
                     }
                 };
