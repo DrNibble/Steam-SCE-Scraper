@@ -85,6 +85,7 @@ function cardRowToApi(row) {
         steamMarketBuyOrderEur: row.steam_market_buy_order_eur ?? null,
         steamMarketBuyOrderQty: row.steam_market_buy_order_qty ?? null,
         owner: row.owner || '',
+        qtyByProfile: row.qty_by_profile ? JSON.parse(row.qty_by_profile) : {},
     };
 }
 

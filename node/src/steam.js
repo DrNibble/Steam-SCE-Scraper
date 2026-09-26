@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import { httpGet, httpGetJSON, clean, isSteamEvent, sleep, parseSteamDateToMs, getSteamCookie, getSteamProfilePath, extractSessionIdFromCookies, INVENTORY_PAGE_DELAY, ES_log } from './utils.js';
+import { httpGet, httpGetJSON, clean, isSteamEvent, sleep, parseSteamDateToMs, getSteamCookie, getSteamProfilePath, getSteamProfilePaths, extractSessionIdFromCookies, INVENTORY_PAGE_DELAY, ES_log } from './utils.js';
 import { upsertBadgeAppid, upsertGame, upsertCards, getMeta, setMeta, getGame, getBadgeAppid, getCards, updateCardMarketPrices, setGameBadgeCrafted, addOwnerToGame, addOwnerToCard, removeOwnerFromGame, getGamesWithOwner } from './db.js';
 
 // Cookie Steam dynamique (recupere via auth.js ou .env)
@@ -327,11 +327,27 @@ export async function fillInventoryData(cards, profileLink = null) {
         // Mise a jour de qty (total toutes profils confondus)
         cards.forEach(c => { c.qty = c.inv.length; });
 
-        // Rebuild owner: reflet exact de l'inventaire.
-// owner = liste des profils qui ont au moins 1 item dans inv
+        // Rebuild owner + qty_by_profile: reflet exact de l'inventaire.
+        // owner = liste des profils qui ont au moins 1 item dans inv
+        // qty_by_profile = { "profilelink1": 3, "profilelink2": 0 }
+        const allProfiles = getSteamProfilePaths();
         cards.forEach(card => {
             if (!card.hash) return;
-            const profiles = [...new Set(card.inv.map(i => i.profile).filter(Boolean))];
+            // Compte par profil depuis inv
+            const qtyByProfile = {};
+            // Initialise tous les profils configures a 0
+            for (const p of allProfiles) {
+                qtyByProfile[p] = 0;
+            }
+            // Compte les items reels
+            for (const item of card.inv) {
+                if (item.profile) {
+                    qtyByProfile[item.profile] = (qtyByProfile[item.profile] || 0) + 1;
+                }
+            }
+            card.qtyByProfile = qtyByProfile;
+            // owner = profils avec au moins 1 item
+            const profiles = Object.entries(qtyByProfile).filter(([, q]) => q > 0).map(([p]) => p);
             card.owner = profiles.join(',');
         });
 
@@ -465,6 +481,7 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
                 iconUrl: c.icon_url,
                 artUrl: c.art_url,
                 owner: c.owner || '',
+                qtyByProfile: c.qty_by_profile ? JSON.parse(c.qty_by_profile) : {},
                 'sce stock': c.sce_stock,
                 'sce worth': c.sce_worth,
                 'sce price': c.sce_price,
@@ -515,6 +532,7 @@ export async function fetchSteamData(appid, profileLink = null, options = {}) {
                 iconUrl: card.imgurl,
                 artUrl: card.arturl,
                 owner: existing?.owner || '',
+                qtyByProfile: existing?.qty_by_profile ? JSON.parse(existing.qty_by_profile) : {},
                 'sce stock': existing?.sce_stock || 0,
                 'sce worth': existing?.sce_worth || 0,
                 'sce price': existing?.sce_price || 0,

@@ -177,6 +177,7 @@ La fonction `initDB()` de `db.js` exécute automatiquement des migrations `ALTER
 | `steam_market_buy_order_qty INTEGER` | cards | Nombre de demandes d'achat |
 | `owner TEXT` | games | Profils qui possèdent ce jeu (séparés par virgules) |
 | `owner TEXT` | cards | Profils qui possèdent cette carte (séparés par virgules) |
+| `qty_by_profile TEXT` | cards | JSON: quantité par profil (ex: `{"my": 3, "profiles/123": 0}`) |
 
 ## Limite 24h des prix marche
 
@@ -515,7 +516,8 @@ L'endpoint `/api/data` retourne un objet JSON plat compatible avec le script Tam
         "steamMarketLastSalePriceEur": 0.06,
         "steamMarketSales7d": 17,
         "steamMarketFetchedAt": 1790249510124,
-        "owner": "my,profiles/76561198028880269"
+        "owner": "my,profiles/76561198028880269",
+        "qtyByProfile": { "my": 3, "profiles/76561198028880269": 0 }
       }
     ]
   }
@@ -563,13 +565,15 @@ L'inventaire des cartes est **accumulé** à travers les profils : chaque item d
 
 Lors d'un re-scan d'un profil, les items de ce profil sont d'abord retirés (pour éviter les doublons) puis ré-ajoutés avec les données fraîches.
 
-### Reflet exact de l'inventaire (`cards.owner`)
+### Reflet exact de l'inventaire (`cards.owner` et `cards.qty_by_profile`)
 
 Le champ `owner` est **reconstruit à chaque scan** depuis `inv` — il reflète exactement quels profils possèdent au moins un exemplaire de la carte. Si un profil vend ou échange toutes ses cartes d'un type, il est **automatiquement retiré** de `owner` au prochain scan de son inventaire.
 
 ```
 fillInventoryData: card.owner = profils uniques dans card.inv
 ```
+
+Le champ `qty_by_profile` (JSON) détaille la quantité par profil : `{"my": 3, "profiles/76561198028880269": 0}`. Il est calculé depuis `inv` en initialisant tous les profils configurés à 0, puis en comptant les items réels. Ainsi, un profil avec 0 carte apparaît explicitement avec `0`.
 
 De même, `games.owner` est nettoyé après chaque scan de badges : si un profil n'a plus un badge (jeu remboursé, etc.), il est retiré de `games.owner` via `removeOwnerFromGame()`.
 
